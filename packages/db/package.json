@@ -1,0 +1,23 @@
+{
+  "name": "@payments/db",
+  "version": "0.0.0",
+  "private": true,
+  "description": "PostgreSQL pool, transactions, migrations and repositories.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "migrations",
+    "seeds"
+  ],
+  "scripts": {
+    "migrate": "node dist/cli/migrate.js",
+    "seed": "node dist/cli/seed.js"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  },
+  "dependencies": {
+    "pg": "8.23.1"
+  }
+}

@@ -526,6 +526,8 @@ Health and metrics routes need no authentication. In production they would be re
 
 PostgreSQL 18. `uuidv7()` is built in from version 18. Enumerations use `text` with `CHECK` constraints, which are easier to change in a migration than PostgreSQL enum types.
 
+Migrations are numbered SQL files in `packages/db/migrations`, applied in order, each in its own transaction, under a PostgreSQL advisory lock so concurrent starts cannot apply a file twice. The runner records each file in `schema_migrations (version, name, checksum, applied_at)` and refuses to run if an applied file has changed. Readiness compares that table with the files on disk.
+
 ### 5.1 Entity relationships
 
 ```mermaid

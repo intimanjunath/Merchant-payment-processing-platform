@@ -1,5 +1,5 @@
 {
   "$schema": "https://json.schemastore.org/tsconfig",
   "files": [],
-  "references": []
+  "references": [{ "path": "packages/db" }]
 }

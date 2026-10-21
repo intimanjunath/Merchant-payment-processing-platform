@@ -17,7 +17,9 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run format:check && npm run lint && npm run build"
+    "check": "npm run format:check && npm run lint && npm run build",
+    "db:migrate": "npm run build && npm run migrate --workspace @payments/db",
+    "db:seed": "npm run build && npm run seed --workspace @payments/db"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
