@@ -2,6 +2,9 @@ import { type DynamicModule, Inject, Module, type OnApplicationShutdown } from '
 import type { Logger, Registry } from '@payments/observability';
 import type { Pool } from 'pg';
 
+import { AuthController } from './auth/auth.controller';
+import { AuthGuard } from './auth/auth.guard';
+import { AuthService } from './auth/auth.service';
 import type { ApiConfig } from './config/config';
 import { HealthController } from './health/health.controller';
 import { DEFAULT_READINESS_TIMEOUT_MS, ReadinessService } from './health/readiness.service';
@@ -23,7 +26,7 @@ export class AppModule implements OnApplicationShutdown {
   static register(deps: ApiDependencies): DynamicModule {
     return {
       module: AppModule,
-      controllers: [HealthController],
+      controllers: [HealthController, AuthController],
       providers: [
         { provide: CONFIG, useValue: deps.config },
         { provide: LOGGER, useValue: deps.logger },
@@ -34,6 +37,8 @@ export class AppModule implements OnApplicationShutdown {
           useValue: deps.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS,
         },
         ReadinessService,
+        AuthService,
+        AuthGuard,
       ],
     };
   }

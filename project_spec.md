@@ -911,6 +911,8 @@ Every line is JSON with `time`, `level`, `service` (`api` or `worker`), `event`,
 |---|---|---|
 | `http.request.completed` | info (warn for 4xx except 401/404, error for 5xx); `/health`, `/ready`, `/metrics` at debug, or warn when they return 5xx | Every request, with method, route template, status and duration |
 | `auth.login.succeeded` / `auth.login.failed` | info / warn | Login or token request |
+| `auth.logout` | info | Session revoked |
+| `auth.rejected` | debug | Request without a valid credential (reason: missing, malformed header, invalid, expired, session not active) |
 | `auth.throttled` | warn | 429 returned |
 | `operation.reserved` | info | TX1 committed |
 | `provider.call.completed` | debug (warn on timeout) | Each provider call, with operation and outcome |

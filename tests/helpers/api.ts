@@ -1,7 +1,7 @@
 import { Writable } from 'node:stream';
 
 import type { NestExpressApplication } from '@nestjs/platform-express';
-import { createPool, migrate } from '@payments/db';
+import { createPool, migrate, seed } from '@payments/db';
 import { createLogger, createMetricsRegistry, type Registry } from '@payments/observability';
 import type { Pool } from 'pg';
 
@@ -25,11 +25,30 @@ export interface TestApiOptions {
 
 const TEST_SECRET = 'test-only-secret-0123456789abcdef';
 
-/** Applies all migrations to the test database. Safe to call from every suite. */
-export async function migrateTestDatabase(): Promise<void> {
+/** Token settings the test API signs with, for crafting tokens in tests. */
+export const TEST_JWT = {
+  secret: TEST_SECRET,
+  issuer: 'payment-platform',
+  audience: 'payment-platform-api',
+};
+export const TEST_CSRF_SECRET = TEST_SECRET;
+
+/** The development merchants from packages/db/seeds/001_merchants.sql. */
+export const SEEDED_MERCHANTS = {
+  acme: { email: 'merchant1@example.test', password: 'acme-coffee-dev', name: 'Acme Coffee' },
+  bicycle: {
+    email: 'merchant2@example.test',
+    password: 'blue-bicycle-dev',
+    name: 'Blue Bicycle Shop',
+  },
+};
+
+/** Applies all migrations (and optionally the seeds) to the test database. Safe to repeat. */
+export async function migrateTestDatabase(options: { seed?: boolean } = {}): Promise<void> {
   const pool = createPool(testDatabaseUrl(), { applicationName: 'test-migrate', max: 1 });
   try {
     await migrate(pool);
+    if (options.seed) await seed(pool);
   } finally {
     await pool.end();
   }
