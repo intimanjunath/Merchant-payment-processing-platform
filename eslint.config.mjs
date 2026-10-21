@@ -20,6 +20,15 @@ export default defineConfig(
     },
   },
   {
+    // Tests poke at parsed JSON and mocks; strict `any` rules add noise there.
+    files: ['**/*.test.ts'],
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unsafe-assignment': 'off',
+      '@typescript-eslint/no-unsafe-member-access': 'off',
+    },
+  },
+  {
     // Plain JavaScript config files are not part of a TypeScript project.
     files: ['**/*.{js,mjs,cjs}'],
     extends: [tseslint.configs.disableTypeChecked],
