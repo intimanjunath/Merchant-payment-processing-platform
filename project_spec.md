@@ -920,7 +920,7 @@ Every line is JSON with `time`, `level`, `service` (`api` or `worker`), `event`,
 | `job.lease_lost` | warn | Generation check failed at finalize |
 | `job.paused` | error | Retries exhausted or review deadline: work moved to `needs_review` |
 
-Redaction (Pino `redact` with censor `[REDACTED]`): `req.headers.authorization`, `req.headers.cookie`, `res.headers["set-cookie"]`, `*.password`, `*.accessToken`, `*.csrfToken`, `*.paymentMethod`, `*.payment_method_token`, `*.cardNumber`, `*.cvv`, `*.secret`. Request and response bodies are never logged.
+Redaction is by key name at any depth, including inside serialized errors and their causes, with the value replaced by `[REDACTED]`. Keys are compared case-insensitively with `-` and `_` ignored: `password`, `passwordHash`, `authorization`, `cookie`, `set-cookie`, `accessToken`, `refreshToken`, `csrfToken`, `idToken`, `jwt`, `paymentMethod`, `payment_method_token`, `cardNumber`, `pan`, `cvv`, `cvc`, `secret`, and any key ending in `password`, `secret` or `token`. Pino's fixed-path `redact` option cannot match keys at arbitrary depth, so redaction runs in the logger's `log` formatter on a copy of the fields. Fields bound with `child()` or `setBindings()` bypass that formatter in pino, so the logger redacts them as they are bound. Request and response bodies are never logged.
 
 ### 7.2 Metrics
 

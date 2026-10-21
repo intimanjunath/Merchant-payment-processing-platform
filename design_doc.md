@@ -35,7 +35,7 @@ The API and worker share payment services. Controllers handle HTTP, services enf
 | One PostgreSQL jobs table and a separate worker | No additional broker. Claim with `SELECT ... FOR UPDATE SKIP LOCKED`, poll every five seconds and implement bounded retry rules. Unlike a queue library, job recovery is our responsibility; keep it limited to this exercise. |
 | JWT plus server-side session | Signed identity with explicit expiry and logout revocation. Browsers carry it in an HttpOnly cookie; API clients send it as a Bearer header. Every request still needs a session lookup; this is intentionally not stateless authentication. |
 | Fake provider with test tokens | Predictable outcomes and restart tests. It does not demonstrate a real provider integration. |
-| Pino, prom-client and trace-context propagation | Structured logs, metrics and a path to tracing. Exporter/backend deployment is optional. |
+| Pino, the Prometheus client (`@prometheus-io/client`, successor to `prom-client`) and trace-context propagation | Structured logs, metrics and a path to tracing. Exporter/backend deployment is optional. |
 
 This document records decisions and tradeoffs. The exact contracts the code must match are in `project_spec.md`: component and package boundaries, sequence diagrams for each flow, request and response shapes, database DDL, provider contract, log events, metric names and configuration.
 
@@ -54,7 +54,9 @@ payment-processing/
 ├── .nvmrc                       # Pinned Node LTS version
 ├── tsconfig.json                # Project references for `tsc -b`
 ├── eslint.config.mjs            # Strict, type-aware lint rules
+├── jest.config.js               # Unit and integration test runner
 ├── .prettierrc
+├── .prettierignore
 ├── tsconfig.base.json
 ├── compose.yaml                 # API, worker, web and PostgreSQL
 ├── .env.example
