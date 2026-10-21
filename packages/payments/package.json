@@ -1,0 +1,11 @@
+{
+  "name": "@payments/payments",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Payment lifecycle rules: transitions, idempotency, reservation and finalization.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ]
+}
