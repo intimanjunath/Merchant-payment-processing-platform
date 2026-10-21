@@ -522,6 +522,8 @@ Order: `created_at DESC, id DESC`. `nextCursor` is `null` on the last page. A cu
 
 Health and metrics routes need no authentication. In production they would be reachable only from the internal network.
 
+Each readiness phase (getting a connection, running the checks) is bounded, 2 s by default. The checks run on one connection inside a read-only transaction with `SET LOCAL statement_timeout`, so PostgreSQL itself cancels a blocked query. A connection that arrives after the limit is released at once, and a connection whose server stops answering is destroyed. Repeated probes during an outage therefore cannot exhaust the pool or delay shutdown.
+
 ## 5. Database schema
 
 PostgreSQL 18. `uuidv7()` is built in from version 18. Enumerations use `text` with `CHECK` constraints, which are easier to change in a migration than PostgreSQL enum types.
@@ -907,7 +909,7 @@ Every line is JSON with `time`, `level`, `service` (`api` or `worker`), `event`,
 
 | Event | Level | Emitted when |
 |---|---|---|
-| `http.request.completed` | info (warn for 4xx except 401/404, error for 5xx) | Every request, with method, route template, status and duration |
+| `http.request.completed` | info (warn for 4xx except 401/404, error for 5xx); `/health`, `/ready`, `/metrics` at debug, or warn when they return 5xx | Every request, with method, route template, status and duration |
 | `auth.login.succeeded` / `auth.login.failed` | info / warn | Login or token request |
 | `auth.throttled` | warn | 429 returned |
 | `operation.reserved` | info | TX1 committed |
@@ -919,6 +921,7 @@ Every line is JSON with `time`, `level`, `service` (`api` or `worker`), `event`,
 | `job.retry_scheduled` | warn | Technical failure consumed retry budget |
 | `job.lease_lost` | warn | Generation check failed at finalize |
 | `job.paused` | error | Retries exhausted or review deadline: work moved to `needs_review` |
+| `db.pool.idle_client_error` | warn | An idle database connection dropped; logged outside any request context |
 
 Redaction is by key name at any depth, including inside serialized errors and their causes, with the value replaced by `[REDACTED]`. Keys are compared case-insensitively with `-` and `_` ignored: `password`, `passwordHash`, `authorization`, `cookie`, `set-cookie`, `accessToken`, `refreshToken`, `csrfToken`, `idToken`, `jwt`, `paymentMethod`, `payment_method_token`, `cardNumber`, `pan`, `cvv`, `cvc`, `secret`, and any key ending in `password`, `secret` or `token`. Pino's fixed-path `redact` option cannot match keys at arbitrary depth, so redaction runs in the logger's `log` formatter on a copy of the fields. Fields bound with `child()` or `setBindings()` bypass that formatter in pino, so the logger redacts them as they are bound. Request and response bodies are never logged.
 

@@ -5,10 +5,12 @@
     "declaration": false,
     "declarationMap": false,
     "noEmit": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
     "types": ["node", "jest"],
     "paths": {
       "@payments/*": ["../packages/*/src"]
     }
   },
-  "include": ["**/*.ts", "../packages/*/src/**/*.test.ts"]
+  "include": ["**/*.ts", "../packages/*/src/**/*.test.ts", "../apps/*/src/**/*.test.ts"]
 }

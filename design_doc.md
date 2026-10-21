@@ -177,6 +177,7 @@ Errors use `{ "error": { "code": "...", "message": "...", "requestId": "..." } }
 | HTTP | Code | When |
 |---|---|---|
 | 400 | `VALIDATION_ERROR` | Invalid body, query, cursor, idempotency key or payment-method token |
+| 413 / 415 | `VALIDATION_ERROR` | Body too large, or an unsupported charset or `Content-Encoding` |
 | 401 | `INVALID_CREDENTIALS` | Login or token request failed (generic message) |
 | 401 | `UNAUTHENTICATED` | Missing, invalid, expired or revoked token |
 | 403 | `CSRF_REJECTED` | Cookie-authenticated mutation without a valid CSRF token or allowed origin |

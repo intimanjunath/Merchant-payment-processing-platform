@@ -18,6 +18,10 @@ export default defineConfig(
         tsconfigRootDir: import.meta.dirname,
       },
     },
+    rules: {
+      // Nest modules are decorated classes with no members of their own.
+      '@typescript-eslint/no-extraneous-class': ['error', { allowWithDecorator: true }],
+    },
   },
   {
     // Tests poke at parsed JSON and mocks; strict `any` rules add noise there.
