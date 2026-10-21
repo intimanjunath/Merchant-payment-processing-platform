@@ -99,22 +99,23 @@ sequenceDiagram
     participant DB as PostgreSQL
     B->>A: POST /auth/login {email, password}
     A->>A: Check Origin is allowed
-    A->>DB: Read login_attempts for email and IP
+    A->>DB: Count this attempt for email and IP (atomic upsert, RETURNING counts)
+    A-->>B: 429 RATE_LIMITED + Retry-After if either count is over its limit
     A->>DB: Read merchant by lower(email)
     A->>A: Verify Argon2id hash
     alt credentials valid
+        A->>DB: Clear the email's counters; take this attempt back from the IP
         A->>DB: Insert session (expires in 8 h)
         A->>A: Sign JWT {sub, sid, iat, exp, iss, aud}
         A-->>B: 200 {merchant, expiresAt, csrfToken} + Set-Cookie pp_session
     else invalid
-        A->>DB: Upsert failure counters
-        A-->>B: 401 INVALID_CREDENTIALS (or 429 if over limit)
+        A-->>B: 401 INVALID_CREDENTIALS (the attempt stays counted)
     end
     Note over B,A: Later authenticated request
     B->>A: POST /payments + cookie + X-CSRF-Token
     A->>A: Verify JWT algorithm, signature, iss, aud, exp
     A->>DB: Session active, not revoked, belongs to sub
-    A->>A: Origin allowed and CSRF token matches session
+    A->>A: CSRF token matches session; Origin/Referer, if sent, is allowed
     A->>A: Continue with merchantId from session
 ```
 
@@ -239,7 +240,7 @@ Every create, capture and refund evaluates these checks in order. The first fail
 | # | Check | Failure |
 |---|---|---|
 | 1 | Authenticate (cookie or Bearer) | 401 `UNAUTHENTICATED` |
-| 2 | Cookie path only: Origin allowed and CSRF token valid | 403 `CSRF_REJECTED` |
+| 2 | Cookie path only: CSRF token valid, and Origin (or Referer) allowed when either is sent | 403 `CSRF_REJECTED` |
 | 3 | `Idempotency-Key` present and valid; body valid; token known | 400 `VALIDATION_ERROR` |
 | 4 | TX1 begins. Capture/refund: `SELECT ... FOR UPDATE` on the payment for this merchant | 404 `NOT_FOUND` |
 | 5 | Operation with (merchant, scope, key) exists, same request hash | Replay saved response, or 202 with current status if unresolved |
@@ -359,6 +360,8 @@ Example: lookup succeeds with "not received", the capture is re-sent and times o
 
 The CSRF token is `HMAC-SHA256(CSRF_SECRET, sessionId)`, so it is bound to the session, can be returned again after a page reload, and needs no storage.
 
+Origin check (cookie-authenticated mutations, `/auth/login`, `/auth/token`): the `Origin` header, or the origin of `Referer` when `Origin` is absent, must be in `ALLOWED_ORIGINS`; an unparsable `Referer` is rejected. A request that sends neither header is deliberately accepted, because non-browser clients usually send neither and browsers send `Origin` on cross-origin POSTs. On the cookie path such a request still needs the correct CSRF token.
+
 ### 4.2 Resources
 
 **Payment**
@@ -442,7 +445,7 @@ The CSRF token is `HMAC-SHA256(CSRF_SECRET, sessionId)`, so it is bound to the s
 }
 ```
 
-Errors: 400, 401 `INVALID_CREDENTIALS`, 403 `CSRF_REJECTED` (Origin present and not allowed), 429 `RATE_LIMITED`.
+Errors: 400, 401 `INVALID_CREDENTIALS`, 403 `CSRF_REJECTED` (Origin, or the Referer's origin when Origin is absent, is not in `ALLOWED_ORIGINS`), 429 `RATE_LIMITED`.
 
 **`POST /auth/token`**: API-client login. Same request and errors. 200, no cookie:
 
@@ -569,6 +572,10 @@ CREATE INDEX sessions_merchant_idx ON sessions (merchant_id);
 
 -- Fixed-window failure counters. subject_hash is SHA-256 of the normalized
 -- email or client IP, so the table does not retain raw emails or addresses.
+-- Every transaction that touches these rows first takes
+-- pg_advisory_xact_lock(1001, hashtext(email hash)), then
+-- pg_advisory_xact_lock(1002, hashtext(IP hash)), so increments, resets and
+-- cleanup never lock in opposite orders.
 CREATE TABLE login_attempts (
   scope        text NOT NULL CHECK (scope IN ('email', 'ip')),
   subject_hash text NOT NULL,
@@ -913,7 +920,8 @@ Every line is JSON with `time`, `level`, `service` (`api` or `worker`), `event`,
 | `auth.login.succeeded` / `auth.login.failed` | info / warn | Login or token request |
 | `auth.logout` | info | Session revoked |
 | `auth.rejected` | debug | Request without a valid credential (reason: missing, malformed header, invalid, expired, session not active) |
-| `auth.throttled` | warn | 429 returned |
+| `auth.throttled` | warn | 429 returned (scope: `email` or `ip`, `retryAfter`) |
+| `auth.csrf_rejected` | warn | 403 `CSRF_REJECTED` (reason: `csrf_token_invalid`, `origin_not_allowed`, `login_origin_not_allowed`) |
 | `operation.reserved` | info | TX1 committed |
 | `provider.call.completed` | debug (warn on timeout) | Each provider call, with operation and outcome |
 | `payment.transitioned` | info | A state transition committed |
