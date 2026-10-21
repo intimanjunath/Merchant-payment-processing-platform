@@ -1,0 +1,64 @@
+name: payment-platform
+
+# Keep the Node version in step with .nvmrc.
+x-node-image: &node-image node:24.22.1-bookworm-slim
+
+services:
+  # Development database: PostgreSQL defaults, durable writes.
+  db:
+    image: postgres:18.6-bookworm
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?copy .env.example to .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?copy .env.example to .env}
+      POSTGRES_DB: ${POSTGRES_DB:?copy .env.example to .env}
+    ports:
+      - '127.0.0.1:${DB_HOST_PORT:-5432}:5432'
+    volumes:
+      - db-data:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Automated tests only. Durability is off for speed; data lives in memory
+  # and disappears when the container stops. Never use these settings for
+  # data worth keeping.
+  test-db:
+    image: postgres:18.6-bookworm
+    command:
+      - postgres
+      - -c
+      - fsync=off
+      - -c
+      - synchronous_commit=off
+      - -c
+      - full_page_writes=off
+    environment:
+      POSTGRES_USER: ${TEST_POSTGRES_USER:?copy .env.example to .env}
+      POSTGRES_PASSWORD: ${TEST_POSTGRES_PASSWORD:?copy .env.example to .env}
+      POSTGRES_DB: ${TEST_POSTGRES_DB:?copy .env.example to .env}
+    ports:
+      - '127.0.0.1:${TEST_DB_HOST_PORT:-5433}:5432'
+    tmpfs:
+      - /var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Tools container for install, build, lint, migrations and tests, so the
+  # host's Node version does not matter. Run with `docker compose run --rm dev <command>`.
+  dev:
+    image: *node-image
+    profiles: ['tools']
+    working_dir: /workspace
+    env_file: .env
+    volumes:
+      - .:/workspace
+      - npm-cache:/root/.npm
+
+volumes:
+  db-data:
+  npm-cache:
