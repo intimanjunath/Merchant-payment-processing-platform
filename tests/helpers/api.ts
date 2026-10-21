@@ -21,6 +21,8 @@ export interface TestApiOptions {
   databaseUrl?: string;
   readinessTimeoutMs?: number;
   applicationName?: string;
+  /** LOGIN_THROTTLE_* overrides; the defaults match production (15 min, 5 per email, 50 per IP). */
+  throttle?: { windowSeconds?: number; maxPerEmail?: number; maxPerIp?: number };
 }
 
 const TEST_SECRET = 'test-only-secret-0123456789abcdef';
@@ -54,6 +56,19 @@ export async function migrateTestDatabase(options: { seed?: boolean } = {}): Pro
   }
 }
 
+/**
+ * Clears failed-login counters so one suite's deliberate failures can't lock
+ * out the seeded merchants for the next.
+ */
+export async function clearLoginAttempts(): Promise<void> {
+  const pool = createPool(testDatabaseUrl(), { applicationName: 'test-reset', max: 1 });
+  try {
+    await pool.query('DELETE FROM login_attempts');
+  } finally {
+    await pool.end();
+  }
+}
+
 /** Builds the API against the test database (or `databaseUrl`) and captures its logs. */
 export async function startTestApi(options: TestApiOptions = {}): Promise<TestApi> {
   const databaseUrl = options.databaseUrl ?? testDatabaseUrl();
@@ -63,6 +78,9 @@ export async function startTestApi(options: TestApiOptions = {}): Promise<TestAp
     CSRF_SECRET: TEST_SECRET,
     CURSOR_SECRET: TEST_SECRET,
     LOG_LEVEL: 'debug',
+    LOGIN_THROTTLE_WINDOW_SECONDS: options.throttle?.windowSeconds?.toString(),
+    LOGIN_THROTTLE_MAX_PER_EMAIL: options.throttle?.maxPerEmail?.toString(),
+    LOGIN_THROTTLE_MAX_PER_IP: options.throttle?.maxPerIp?.toString(),
   });
   const logs: Record<string, unknown>[] = [];
   const destination = new Writable({

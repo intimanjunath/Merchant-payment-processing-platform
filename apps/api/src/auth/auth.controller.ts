@@ -8,10 +8,11 @@ import {
   HttpCode,
   Inject,
   Post,
+  Req,
   Res,
   UseGuards,
 } from '@nestjs/common';
-import type { CookieOptions, Response } from 'express';
+import type { CookieOptions, Request, Response } from 'express';
 
 import type { ApiConfig } from '../config/config';
 import { CONFIG } from '../tokens';
@@ -19,7 +20,13 @@ import { type AuthContext, type AuthenticatedRequest, SESSION_COOKIE } from './a
 import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
 import { csrfTokenFor } from './csrf';
+import { LoginOriginGuard } from './login-origin.guard';
 import { LoginDto } from './login.dto';
+
+/** The client address Express resolved (honouring TRUST_PROXY), used for throttling. */
+function clientIp(req: Request): string {
+  return req.ip ?? req.socket.remoteAddress ?? 'unknown';
+}
 
 const CurrentAuth = createParamDecorator(
   (_data: unknown, context: ExecutionContext): AuthContext =>
@@ -35,10 +42,15 @@ export class AuthController {
 
   /** Browser login: the token goes in an HttpOnly cookie, never in the body. */
   @Post('login')
+  @UseGuards(LoginOriginGuard)
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
-  async login(@Body() body: LoginDto, @Res({ passthrough: true }) res: Response) {
-    const result = await this.auth.login(body.email, body.password, 'browser');
+  async login(
+    @Body() body: LoginDto,
+    @Req() req: Request,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    const result = await this.auth.login(body.email, body.password, 'browser', clientIp(req));
     res.cookie(SESSION_COOKIE, result.token, {
       ...this.cookieOptions(),
       maxAge: result.session.expiresAt.getTime() - Date.now(),
@@ -52,10 +64,11 @@ export class AuthController {
 
   /** API-client login: the token is returned for use as a Bearer token; no cookie. */
   @Post('token')
+  @UseGuards(LoginOriginGuard)
   @HttpCode(200)
   @Header('Cache-Control', 'no-store')
-  async token(@Body() body: LoginDto) {
-    const result = await this.auth.login(body.email, body.password, 'api');
+  async token(@Body() body: LoginDto, @Req() req: Request) {
+    const result = await this.auth.login(body.email, body.password, 'api', clientIp(req));
     return {
       accessToken: result.token,
       tokenType: 'Bearer',

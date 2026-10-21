@@ -15,6 +15,7 @@ import { ApiError } from '../common/api-error';
 import type { ApiConfig } from '../config/config';
 import { CONFIG, DB_POOL, LOGGER } from '../tokens';
 import type { AuthContext } from './auth-context';
+import { LoginThrottleService } from './login-throttle.service';
 import { signSessionToken, type TokenSettings, verifySessionToken } from './session-token';
 
 export interface LoginResult {
@@ -36,13 +37,24 @@ export class AuthService {
     @Inject(CONFIG) private readonly config: ApiConfig,
     @Inject(DB_POOL) private readonly pool: Pool,
     @Inject(LOGGER) private readonly logger: Logger,
+    private readonly throttle: LoginThrottleService,
   ) {
     this.tokens = config.jwt;
     this.dummyHash = argon2.hash('no-account-has-this-password', { type: argon2.argon2id });
   }
 
-  /** Checks credentials and opens a session. Every failure looks the same to the caller. */
-  async login(email: string, password: string, clientKind: ClientKind): Promise<LoginResult> {
+  /**
+   * Checks credentials and opens a session. Every failure looks the same to the
+   * caller. The attempt is counted and throttled first, so a locked-out caller
+   * learns nothing about the password; a failure stays counted.
+   */
+  async login(
+    email: string,
+    password: string,
+    clientKind: ClientKind,
+    clientIp: string,
+  ): Promise<LoginResult> {
+    const throttleKey = await this.throttle.assertAllowed(email, clientIp);
     const merchant = await findMerchantByEmail(this.pool, email.trim());
     const hash = merchant?.passwordHash ?? (await this.dummyHash);
     const passwordMatches = await argon2.verify(hash, password);
@@ -55,6 +67,7 @@ export class AuthService {
       throw new ApiError(401, 'INVALID_CREDENTIALS', 'Email or password is incorrect.');
     }
 
+    await this.throttle.recordSuccess(throttleKey);
     const session = await createSession(this.pool, {
       merchantId: merchant.id,
       clientKind,

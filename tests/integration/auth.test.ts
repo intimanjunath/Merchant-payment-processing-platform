@@ -5,6 +5,7 @@ import { Client } from 'pg';
 import request from 'supertest';
 
 import {
+  clearLoginAttempts,
   migrateTestDatabase,
   SEEDED_MERCHANTS,
   startTestApi,
@@ -22,6 +23,7 @@ describe('authentication', () => {
 
   beforeAll(async () => {
     await migrateTestDatabase({ seed: true });
+    await clearLoginAttempts();
     api = await startTestApi();
   });
 
@@ -214,10 +216,11 @@ describe('authentication', () => {
     });
 
     it('rejects a token after logout, including the cookie that was used to log out', async () => {
-      const { cookie } = await browserLogin();
+      const { res: login, cookie } = await browserLogin();
       const logout = await request(server())
         .post('/auth/logout')
         .set('Cookie', `pp_session=${cookie}`)
+        .set('X-CSRF-Token', String(login.body.csrfToken))
         .expect(204);
 
       expect(String(logout.headers['set-cookie'])).toMatch(
