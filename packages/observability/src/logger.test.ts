@@ -1,6 +1,6 @@
 import { Writable } from 'node:stream';
 
-import { runWithContext } from './context';
+import { runOutsideContext, runWithContext } from './context';
 import { createLogger, type LogLevel } from './logger';
 import { REDACTED } from './redact';
 
@@ -190,5 +190,20 @@ describe('createLogger', () => {
     expect(lines[0]).toMatchObject({ requestId: 'req-42', traceId: 'a'.repeat(32) });
     expect(lines[1]).toMatchObject({ requestId: 'req-42' });
     expect(lines[2]).not.toHaveProperty('requestId');
+  });
+
+  it('logs background events without the context of whichever request is in scope', () => {
+    const { logger, lines } = capture();
+
+    runWithContext({ requestId: 'req-unrelated', traceId: 'b'.repeat(32) }, () => {
+      runOutsideContext(() => {
+        logger.warn({ event: 'db.pool.idle_client_error' }, 'Idle database connection lost');
+      });
+      logger.info('still inside');
+    });
+
+    expect(lines[0]).not.toHaveProperty('requestId');
+    expect(lines[0]).not.toHaveProperty('traceId');
+    expect(lines[1]).toMatchObject({ requestId: 'req-unrelated' });
   });
 });

@@ -1,7 +1,9 @@
-export { addToContext, getContext, runWithContext } from './context';
+export { addToContext, getContext, runOutsideContext, runWithContext } from './context';
 export type { LogContext } from './context';
 export { createLogger, isLogLevel, LOG_LEVELS } from './logger';
 export type { Logger, LoggerOptions, LogLevel } from './logger';
+export { createHttpMetrics, statusClass, UNMATCHED_ROUTE } from './http-metrics';
+export type { HttpMetrics } from './http-metrics';
 export { Counter, createMetricsRegistry, Gauge, Histogram, Registry } from './metrics';
 export { isSensitiveKey, redact, REDACTED } from './redact';
 export { REQUEST_ID_HEADER, resolveRequestId } from './request-id';

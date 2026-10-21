@@ -19,6 +19,15 @@ export function runWithContext<T>(context: LogContext, fn: () => T): T {
   return storage.run({ ...context }, fn);
 }
 
+/**
+ * Runs `fn` with no context. For background events (like a pool connection
+ * dropping) that fire on a socket opened during some earlier request and would
+ * otherwise be logged under that request's ID.
+ */
+export function runOutsideContext<T>(fn: () => T): T {
+  return storage.exit(fn);
+}
+
 export function getContext(): LogContext | undefined {
   return storage.getStore();
 }
