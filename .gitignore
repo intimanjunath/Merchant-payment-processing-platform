@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Build output and caches
+dist/
+coverage/
+*.tsbuildinfo
+
+# Environment files (copy .env.example to .env; never commit real values)
+.env
+.env.*
+!.env.example
+
+# Logs
+npm-debug.log*
+*.log
+
+# Local working notes (not part of the repository)
+docs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.swp

@@ -1,0 +1,7 @@
+node_modules/
+dist/
+coverage/
+package-lock.json
+
+# Hand-written documents: keep their formatting as authored.
+*.md
