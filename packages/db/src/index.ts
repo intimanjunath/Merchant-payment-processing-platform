@@ -9,5 +9,7 @@ export {
   revokeSession,
 } from './repositories/auth';
 export type { ActiveSession, ClientKind, Merchant, MerchantRecord } from './repositories/auth';
+export { countAttempt, forgiveAttempt } from './repositories/login-throttle';
+export type { ThrottleKey } from './repositories/login-throttle';
 export { seed } from './seed';
 export { withTransaction } from './transaction';
