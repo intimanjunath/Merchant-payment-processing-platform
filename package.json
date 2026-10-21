@@ -14,20 +14,25 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
+    "typecheck:tests": "tsc -p tests/tsconfig.json",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "check": "npm run format:check && npm run lint && npm run build",
+    "test": "npm run build && jest --runInBand",
+    "check": "npm run format:check && npm run lint && npm run build && npm run typecheck:tests",
     "db:migrate": "npm run build && npm run migrate --workspace @payments/db",
     "db:seed": "npm run build && npm run seed --workspace @payments/db"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
+    "@types/jest": "30.0.0",
     "@types/node": "24.19.2",
     "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",
     "globals": "17.13.0",
+    "jest": "30.5.2",
     "prettier": "3.9.10",
+    "ts-jest": "29.4.15",
     "typescript": "6.0.3",
     "typescript-eslint": "8.72.0"
   }

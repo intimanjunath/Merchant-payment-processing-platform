@@ -55,6 +55,11 @@ services:
     profiles: ['tools']
     working_dir: /workspace
     env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+      test-db:
+        condition: service_healthy
     volumes:
       - .:/workspace
       - npm-cache:/root/.npm
