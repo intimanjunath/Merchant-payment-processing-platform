@@ -69,13 +69,19 @@ export async function migrate(pool: Pool, dir = MIGRATIONS_DIR): Promise<string[
   }
 }
 
-/** Read-only check used by readiness probes. Does not create the tracking table. */
-export async function migrationStatus(pool: Pool, dir = MIGRATIONS_DIR): Promise<MigrationStatus> {
+/**
+ * Read-only check used by readiness probes. Does not create the tracking table.
+ * Accepts a checked-out client so callers can bound it with their own timeout.
+ */
+export async function migrationStatus(
+  db: Pool | PoolClient,
+  dir = MIGRATIONS_DIR,
+): Promise<MigrationStatus> {
   const migrations = await loadMigrations(dir);
-  const exists = await pool.query<{ exists: boolean }>(
+  const exists = await db.query<{ exists: boolean }>(
     "SELECT to_regclass('public.schema_migrations') IS NOT NULL AS exists",
   );
-  const applied = exists.rows[0]?.exists ? await readApplied(pool) : [];
+  const applied = exists.rows[0]?.exists ? await readApplied(db) : [];
   const pending = planPending(migrations, applied);
   return { applied: applied.map((m) => m.name), pending: pending.map((m) => m.name) };
 }
