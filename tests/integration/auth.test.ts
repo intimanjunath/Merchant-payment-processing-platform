@@ -110,9 +110,9 @@ describe('authentication', () => {
         .expect(400);
 
       expect(missing.body.error.code).toBe('VALIDATION_ERROR');
-      expect(extra.body.error.details.issues).toEqual(
-        expect.arrayContaining([expect.stringContaining('cardNumber')]),
-      );
+      expect(extra.body.error.details.fields).toEqual([
+        { field: 'cardNumber', issue: 'is not an accepted field' },
+      ]);
       expect(JSON.stringify(extra.body)).not.toContain('4242424242424242');
     });
 

@@ -24,6 +24,10 @@ export class ApiExceptionFilter implements ExceptionFilter {
     if (response.headersSent) {
       return;
     }
-    response.status(result.status).set(result.headers).json(result.body);
+    // Errors carry request IDs and are never worth caching.
+    response
+      .status(result.status)
+      .set({ 'Cache-Control': 'no-store', ...result.headers })
+      .json(result.body);
   }
 }

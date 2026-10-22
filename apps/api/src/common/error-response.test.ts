@@ -37,16 +37,14 @@ describe('toErrorResponse', () => {
     expect(JSON.stringify(response.body)).not.toContain('/secret/path');
   });
 
-  it('keeps validation messages from the validation pipe as details', () => {
-    const response = toErrorResponse(
-      new BadRequestException(['amount must be an integer', 'reference should not be empty']),
-      'req-3',
-    );
+  it('does not pass a framework 400 message through as details', () => {
+    const response = toErrorResponse(new BadRequestException(['parser internals here']), 'req-3');
 
     expect(response.status).toBe(400);
-    expect(response.body.error).toMatchObject({
+    expect(response.body.error).toEqual({
       code: 'VALIDATION_ERROR',
-      details: { issues: ['amount must be an integer', 'reference should not be empty'] },
+      message: 'The request is not valid.',
+      requestId: 'req-3',
     });
   });
 

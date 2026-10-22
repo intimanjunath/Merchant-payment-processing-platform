@@ -1,4 +1,5 @@
 import { HttpException } from '@nestjs/common';
+import { isDatabaseUnavailable } from '@payments/db';
 
 import { ApiError, type ErrorCode } from './api-error';
 
@@ -33,6 +34,8 @@ const FRAMEWORK_ERRORS: Record<number, { code: ErrorCode; message: string }> = {
   503: { code: 'SERVICE_UNAVAILABLE', message: 'The service is temporarily unavailable.' },
 };
 
+const UNAVAILABLE_MESSAGE = 'The service is temporarily unavailable. Try again later.';
+
 const INTERNAL: { code: ErrorCode; message: string } = {
   code: 'INTERNAL_ERROR',
   message: 'Something went wrong. Quote the request ID if you contact support.',
@@ -51,9 +54,7 @@ export function toErrorResponse(exception: unknown, requestId: string): ErrorRes
     const status = exception.getStatus();
     const known = FRAMEWORK_ERRORS[status];
     if (known) {
-      return build(status, known.code, known.message, requestId, {
-        details: status === 400 ? validationDetails(exception) : undefined,
-      });
+      return build(status, known.code, known.message, requestId);
     }
     if (status < 500) {
       return build(status, 'VALIDATION_ERROR', FRAMEWORK_ERRORS[400]?.message ?? '', requestId);
@@ -64,6 +65,15 @@ export function toErrorResponse(exception: unknown, requestId: string): ErrorRes
   const parserError = bodyParserClientError(exception);
   if (parserError) {
     return build(parserError.status, 'VALIDATION_ERROR', parserError.message, requestId);
+  }
+
+  // The database being unreachable means the work was not durably accepted.
+  // Still logged as unexpected: someone needs to look at it.
+  if (isDatabaseUnavailable(exception)) {
+    return {
+      ...build(503, 'SERVICE_UNAVAILABLE', UNAVAILABLE_MESSAGE, requestId),
+      unexpected: true,
+    };
   }
 
   return { ...build(500, INTERNAL.code, INTERNAL.message, requestId), unexpected: true };
@@ -84,16 +94,6 @@ function build(
     headers: extra.headers ?? {},
     unexpected: false,
   };
-}
-
-/** Keeps the field messages from Nest's ValidationPipe, which are about the client's input. */
-function validationDetails(exception: HttpException): Record<string, unknown> | undefined {
-  const response = exception.getResponse();
-  if (typeof response === 'object' && 'message' in response && Array.isArray(response.message)) {
-    const issues = response.message.filter((item): item is string => typeof item === 'string');
-    return issues.length > 0 ? { issues } : undefined;
-  }
-  return undefined;
 }
 
 // body-parser's client-side failures, by error `type`, with the status it sets:

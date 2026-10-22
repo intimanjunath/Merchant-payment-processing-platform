@@ -1,6 +1,5 @@
 import 'reflect-metadata';
 
-import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { createHttpMetrics } from '@payments/observability';
@@ -14,6 +13,7 @@ import {
   handleBodyParserErrors,
   trackRequests,
 } from './common/request-tracking';
+import { createValidationPipe } from './common/validation';
 
 const JSON_BODY_LIMIT = '64kb';
 
@@ -38,11 +38,7 @@ export async function createApp(deps: ApiDependencies): Promise<NestExpressAppli
   app.use(bindRequestContext);
   app.use(cookieParser());
 
-  // Unknown fields are rejected, not silently dropped: a field such as cardNumber
-  // must fail loudly rather than be accepted and ignored.
-  app.useGlobalPipes(
-    new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true, transform: true }),
-  );
+  app.useGlobalPipes(createValidationPipe());
 
   app.useGlobalFilters(new ApiExceptionFilter(deps.logger));
   app.enableShutdownHooks();
