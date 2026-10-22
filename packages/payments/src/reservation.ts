@@ -25,6 +25,7 @@ import {
   PaymentNotFoundError,
   UnknownPaymentMethodError,
 } from './errors';
+import { canonicalPaymentId } from './ids';
 import { actionRequestHash, createRequestHash } from './request-hash';
 import {
   assertActionAllowed,
@@ -68,7 +69,6 @@ export type Reservation =
 
 const CREATE_SCOPE = 'create';
 const IDEMPOTENCY_INDEX = 'operations_idempotency_key';
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * TX1 for POST /payments: payment (pending, version 0), operation, a recovery
@@ -148,10 +148,9 @@ export async function reserveAction(
   context: MutationContext,
   input: { paymentId: string; action: PaymentAction },
 ): Promise<Reservation> {
-  if (!UUID.test(input.paymentId)) throw new PaymentNotFoundError();
-  // PostgreSQL reads any spelling of a UUID as the same value, so the scope and
-  // hash must use one spelling too, or a differently cased ID escapes replay.
-  const paymentId = input.paymentId.toLowerCase();
+  // One spelling for the lock, scope and hash, or a differently cased ID escapes replay.
+  const paymentId = canonicalPaymentId(input.paymentId);
+  if (!paymentId) throw new PaymentNotFoundError();
   const hash = actionRequestHash({ action: input.action, paymentId });
   const scope = `${input.action}:${paymentId}`;
 

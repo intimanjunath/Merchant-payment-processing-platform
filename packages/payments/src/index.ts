@@ -40,3 +40,5 @@ export { capturePayment, createPayment, refundPayment } from './payments';
 export type { PaymentDeps } from './payments';
 export { mutationResponse, toOperationResource, toPaymentResource } from './resources';
 export type { MutationResponse } from './resources';
+export { getPaymentDetails, toTransitionResource } from './details';
+export { canonicalPaymentId } from './ids';
