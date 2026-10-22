@@ -1,4 +1,4 @@
-import { InvalidStateTransitionError, PaymentError } from '@payments/payments';
+import { InvalidInputError, InvalidStateTransitionError, PaymentError } from '@payments/payments';
 
 import { ApiError } from '../common/api-error';
 
@@ -17,6 +17,11 @@ export function toApiError(error: unknown): unknown {
       },
     );
   }
+  if (error instanceof InvalidInputError) {
+    return new ApiError(400, 'VALIDATION_ERROR', 'Request validation failed.', {
+      details: { fields: [{ field: error.field, issue: error.message }] },
+    });
+  }
   if (!(error instanceof PaymentError)) return error;
 
   switch (error.code) {
@@ -27,8 +32,6 @@ export function toApiError(error: unknown): unknown {
     case 'OPERATION_IN_PROGRESS':
       return new ApiError(409, 'OPERATION_IN_PROGRESS', error.message);
     case 'VALIDATION_ERROR':
-      return new ApiError(400, 'VALIDATION_ERROR', 'Request validation failed.', {
-        details: { fields: [{ field: 'paymentMethod', issue: error.message }] },
-      });
+      return new ApiError(400, 'VALIDATION_ERROR', 'Request validation failed.');
   }
 }

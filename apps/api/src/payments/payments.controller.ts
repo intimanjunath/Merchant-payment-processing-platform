@@ -1,8 +1,20 @@
-import { Body, Controller, Get, Header, Inject, Param, Post, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Header,
+  Inject,
+  Param,
+  Post,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import {
   capturePayment,
   createPayment,
   getPaymentDetails,
+  listPaymentsPage,
   type MutationContext,
   type MutationResponse,
   type PaymentDeps,
@@ -14,11 +26,13 @@ import type { AuthContext } from '../auth/auth-context';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentAuth } from '../auth/current-auth';
 import { ApiError } from '../common/api-error';
+import type { ApiConfig } from '../config/config';
 import { requestIdOf, traceparentOf } from '../common/request-tracking';
-import { PAYMENT_DEPS } from '../tokens';
+import { CONFIG, PAYMENT_DEPS } from '../tokens';
 import { CreatePaymentDto } from './create-payment.dto';
 import { assertEmptyBody } from './empty-body';
 import { IdempotencyKey } from './idempotency-key';
+import { DEFAULT_LIST_LIMIT, ListPaymentsQuery } from './list-payments.query';
 import { toApiError } from './payment-errors';
 
 interface RejectedBody {
@@ -32,7 +46,30 @@ interface RejectedBody {
 @Controller('payments')
 @UseGuards(AuthGuard)
 export class PaymentsController {
-  constructor(@Inject(PAYMENT_DEPS) private readonly deps: PaymentDeps) {}
+  constructor(
+    @Inject(PAYMENT_DEPS) private readonly deps: PaymentDeps,
+    @Inject(CONFIG) private readonly config: ApiConfig,
+  ) {}
+
+  @Get()
+  @Header('Cache-Control', 'no-store')
+  async list(
+    @CurrentAuth() auth: AuthContext,
+    @Query() query: ListPaymentsQuery,
+  ): Promise<unknown> {
+    return this.run(() =>
+      listPaymentsPage(
+        { pool: this.deps.pool, cursorSecret: this.config.cursorSecret },
+        auth.merchant.id,
+        {
+          status: query.status,
+          q: query.q,
+          cursor: query.cursor,
+          limit: query.limit ?? DEFAULT_LIST_LIMIT,
+        },
+      ),
+    );
+  }
 
   @Post()
   @Header('Cache-Control', 'no-store')
@@ -101,7 +138,7 @@ export class PaymentsController {
     };
   }
 
-  private async run(work: () => Promise<MutationResponse>): Promise<MutationResponse> {
+  private async run<T>(work: () => Promise<T>): Promise<T> {
     try {
       return await work();
     } catch (error) {

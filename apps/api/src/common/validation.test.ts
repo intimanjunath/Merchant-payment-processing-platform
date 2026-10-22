@@ -33,6 +33,13 @@ describe('fieldIssues', () => {
     ).toEqual([{ field: 'cardNumber', issue: 'is not an accepted field' }]);
   });
 
+  it('lists a message shared by several broken rules once', () => {
+    const message = 'limit must be an integer from 1 to 100';
+    expect(fieldIssues([error('limit', { isInt: message, min: message, max: message })])).toEqual([
+      { field: 'limit', issue: message },
+    ]);
+  });
+
   it('names nested fields by path', () => {
     expect(
       fieldIssues([error('payment', undefined, [error('amount', { min: 'too small' })])]),

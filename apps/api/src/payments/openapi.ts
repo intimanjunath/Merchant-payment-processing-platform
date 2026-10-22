@@ -109,6 +109,15 @@ const schemas = {
       transitions: { type: 'array', items: ref('Transition'), description: 'Oldest first' },
     },
   },
+  PaymentList: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['items', 'nextCursor'],
+    properties: {
+      items: { type: 'array', items: ref('Payment'), description: 'Newest first' },
+      nextCursor: nullable({ type: 'string', description: 'null on the last page' }),
+    },
+  },
   CreatePaymentRequest: {
     type: 'object',
     additionalProperties: false,
@@ -360,6 +369,44 @@ export const OPENAPI_DOCUMENT = {
       },
     },
     '/payments': {
+      get: {
+        operationId: 'listPayments',
+        summary: "The merchant's payments, newest first",
+        security: authenticated,
+        parameters: [
+          {
+            name: 'status',
+            in: 'query',
+            required: false,
+            schema: { type: 'string', enum: PAYMENT_STATES },
+          },
+          {
+            name: 'q',
+            in: 'query',
+            required: false,
+            description: 'Case-insensitive substring of the reference; % and _ match themselves',
+            schema: { type: 'string', minLength: 1, maxLength: 100 },
+          },
+          {
+            name: 'limit',
+            in: 'query',
+            required: false,
+            schema: { type: 'integer', minimum: 1, maximum: 100, default: 25 },
+          },
+          {
+            name: 'cursor',
+            in: 'query',
+            required: false,
+            description: 'nextCursor from the previous page, with the same status and q',
+            schema: { type: 'string', maxLength: 512 },
+          },
+        ],
+        responses: {
+          '200': { description: 'One page', ...json(ref('PaymentList')) },
+          '400': error('Invalid parameter, or a cursor that is tampered or for other filters'),
+          '401': error('Not authenticated'),
+        },
+      },
       post: {
         operationId: 'createPayment',
         summary: 'Create and authorize a payment',

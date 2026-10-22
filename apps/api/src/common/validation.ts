@@ -14,13 +14,21 @@ export interface FieldIssue {
  * a card number in an unknown field is not echoed back.
  */
 export function fieldIssues(errors: ValidationError[], parent = ''): FieldIssue[] {
-  return errors.flatMap((error) => {
+  const issues = errors.flatMap((error): FieldIssue[] => {
     const field = parent ? `${parent}.${error.property}` : error.property;
     const own = Object.entries(error.constraints ?? {}).map(([rule, message]) => ({
       field,
       issue: rule === 'whitelistValidation' ? 'is not an accepted field' : message,
     }));
     return [...own, ...fieldIssues(error.children ?? [], field)];
+  });
+  // Several rules can share one message (limit: integer, at least 1, at most 100); list it once.
+  const seen = new Set<string>();
+  return issues.filter(({ field, issue }) => {
+    const key = `${field}\u0000${issue}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
   });
 }
 
