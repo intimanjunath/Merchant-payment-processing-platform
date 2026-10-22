@@ -608,16 +608,19 @@ export async function renewLease(
 
 // Recovery outcomes (step 13). Callers lock operation → job and check the lease generation first.
 
-/** Back to the queue after a failed attempt: lease cleared, failure count recorded, due after the backoff. */
+/**
+ * Back to the queue: lease cleared, failure count recorded, due after the
+ * delay. A null lastError (an ordinary poll) keeps the previous one.
+ */
 export async function rescheduleJob(
   db: Db,
-  job: { jobId: string; dueInMs: number; consecutiveFailures: number; lastError: string },
+  job: { jobId: string; dueInMs: number; consecutiveFailures: number; lastError: string | null },
 ): Promise<void> {
   await db.query(
     `UPDATE jobs
         SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
             due_at = now() + make_interval(secs => $2::float8 / 1000),
-            consecutive_failures = $3, last_error = $4, updated_at = now()
+            consecutive_failures = $3, last_error = coalesce($4, last_error), updated_at = now()
       WHERE id = $1`,
     [job.jobId, job.dueInMs, job.consecutiveFailures, job.lastError],
   );
@@ -652,4 +655,11 @@ export async function findJob(db: Db, jobId: string): Promise<JobRecord | undefi
     jobId,
   ]);
   return result.rows[0];
+}
+
+/** Paused settlement: the payment stays captured, flagged for an operator (spec §7 of the design). */
+export async function flagSettlementReview(db: Db, paymentId: string): Promise<void> {
+  await db.query(`UPDATE payments SET settlement_review = true, updated_at = now() WHERE id = $1`, [
+    paymentId,
+  ]);
 }

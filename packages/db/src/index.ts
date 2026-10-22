@@ -34,6 +34,7 @@ export {
   claimDueJobs,
   completeJob,
   findJob,
+  flagSettlementReview,
   findOperation,
   findOperationByKey,
   findPayment,

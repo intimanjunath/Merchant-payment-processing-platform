@@ -18,7 +18,7 @@ export function isProviderFailure(value: object): value is ProviderFailure {
  */
 export async function callProvider<T extends { outcome: string }>(
   logger: Logger,
-  ids: { paymentId: string; operationId: string; action: string; call: string },
+  ids: { paymentId: string; operationId?: string; action: string; call: string },
   call: () => Promise<T>,
 ): Promise<T | ProviderFailure> {
   const started = performance.now();

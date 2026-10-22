@@ -53,3 +53,5 @@ export { claimJobs, JOB_TYPES, renewJobLease } from './jobs';
 export type { JobType } from './jobs';
 export { recoverOperation, retryDelayMs } from './recovery';
 export type { RecoveryDeps, RecoveryOutcome } from './recovery';
+export { settlePayment } from './settlement';
+export type { SettlementDeps, SettlementOutcome } from './settlement';
