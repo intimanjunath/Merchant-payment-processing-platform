@@ -31,6 +31,8 @@ export type {
   StoredOutcome,
 } from './repositories/provider';
 export {
+  completeJob,
+  findOperation,
   findOperationByKey,
   findPayment,
   findUnresolvedOperation,
@@ -38,8 +40,17 @@ export {
   insertLeasedRecoveryJob,
   insertOperation,
   insertPayment,
+  insertSettlementJob,
   isUniqueViolation,
+  lockOperation,
+  lockOwnedJob,
+  lockPayment,
   lockPaymentForMerchant,
+  markAwaitingConfirmation,
+  requeueJob,
+  resolveOperation,
+  saveOperationResponse,
+  transitionPayment,
 } from './repositories/payments';
 export type {
   JobRecord,

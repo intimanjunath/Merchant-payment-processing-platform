@@ -284,3 +284,189 @@ export function isUniqueViolation(error: unknown, constraint: string): boolean {
     (error as { constraint?: unknown }).constraint === constraint
   );
 }
+
+// Finalization and recovery scheduling. Callers lock in the order
+// payment → operation → job and skip rows they don't need.
+
+export async function findOperation(
+  db: Db,
+  operationId: string,
+): Promise<OperationRecord | undefined> {
+  const result = await db.query<OperationRecord>(
+    `SELECT ${OPERATION_COLUMNS} FROM operations WHERE id = $1`,
+    [operationId],
+  );
+  return result.rows[0];
+}
+
+export async function lockPayment(db: Db, paymentId: string): Promise<PaymentRecord | undefined> {
+  const result = await db.query<PaymentRecord>(
+    `SELECT ${PAYMENT_COLUMNS} FROM payments WHERE id = $1 FOR UPDATE`,
+    [paymentId],
+  );
+  return result.rows[0];
+}
+
+export async function lockOperation(
+  db: Db,
+  operationId: string,
+): Promise<OperationRecord | undefined> {
+  const result = await db.query<OperationRecord>(
+    `SELECT ${OPERATION_COLUMNS} FROM operations WHERE id = $1 FOR UPDATE`,
+    [operationId],
+  );
+  return result.rows[0];
+}
+
+/**
+ * Locks the job only if it is still running under the caller's lease
+ * generation. No row means the caller no longer owns the work.
+ */
+export async function lockOwnedJob(
+  db: Db,
+  jobId: string,
+  generation: number,
+): Promise<JobRecord | undefined> {
+  const result = await db.query<JobRecord>(
+    `SELECT ${JOB_COLUMNS}
+       FROM jobs
+      WHERE id = $1 AND status = 'running' AND lease_generation = $2
+        FOR UPDATE`,
+    [jobId, generation],
+  );
+  return result.rows[0];
+}
+
+/**
+ * The compare-and-set transition: state and failure reason change together,
+ * and only if the payment is still at the version and state the operation
+ * expected. Undefined when no row matched.
+ */
+export async function transitionPayment(
+  db: Db,
+  change: {
+    paymentId: string;
+    expectedVersion: number;
+    from: string;
+    to: string;
+    failureReason: string | null;
+    providerPaymentId: string | null;
+  },
+): Promise<PaymentRecord | undefined> {
+  const result = await db.query<PaymentRecord>(
+    `UPDATE payments
+        SET state = $4,
+            failure_reason = $5,
+            provider_payment_id = coalesce($6, provider_payment_id),
+            version = version + 1,
+            updated_at = now()
+      WHERE id = $1 AND version = $2 AND state = $3
+      RETURNING ${PAYMENT_COLUMNS}`,
+    [
+      change.paymentId,
+      change.expectedVersion,
+      change.from,
+      change.to,
+      change.failureReason,
+      change.providerPaymentId,
+    ],
+  );
+  return result.rows[0];
+}
+
+export async function resolveOperation(
+  db: Db,
+  resolution: { operationId: string; status: 'succeeded' | 'rejected'; reason: string | null },
+): Promise<OperationRecord> {
+  const result = await db.query<OperationRecord>(
+    `UPDATE operations
+        SET status = $2, reason = $3, completed_at = now(), updated_at = now()
+      WHERE id = $1
+      RETURNING ${OPERATION_COLUMNS}`,
+    [resolution.operationId, resolution.status, resolution.reason],
+  );
+  return firstRow(result.rows);
+}
+
+/** The response a replay of this operation's key returns from now on. */
+export async function saveOperationResponse(
+  db: Db,
+  operationId: string,
+  response: { status: number; body: unknown },
+): Promise<void> {
+  await db.query(`UPDATE operations SET response_status = $2, response_body = $3 WHERE id = $1`, [
+    operationId,
+    response.status,
+    JSON.stringify(response.body),
+  ]);
+}
+
+export async function completeJob(db: Db, jobId: string): Promise<void> {
+  await db.query(
+    `UPDATE jobs
+        SET status = 'completed', lease_owner = NULL, lease_expires_at = NULL,
+            completed_at = now(), updated_at = now()
+      WHERE id = $1`,
+    [jobId],
+  );
+}
+
+/**
+ * Schedules the settlement check for a captured payment. It inherits the
+ * capture's request ID and trace context, so settlement logs join the same
+ * trace. A second insert for the same payment does nothing.
+ */
+export async function insertSettlementJob(
+  db: Db,
+  job: {
+    paymentId: string;
+    dueInMs: number;
+    reviewDeadlineSeconds: number;
+    requestId: string;
+    traceparent: string | null;
+  },
+): Promise<void> {
+  await db.query(
+    `INSERT INTO jobs (type, work_key, payment_id, status, due_at, review_deadline, request_id, traceparent)
+     VALUES ('settlement', $2, $1, 'queued', now() + make_interval(secs => $3::float8 / 1000),
+             now() + make_interval(secs => $4), $5, $6)
+     ON CONFLICT (work_key) DO NOTHING`,
+    [
+      job.paymentId,
+      `settle:${job.paymentId}`,
+      job.dueInMs,
+      job.reviewDeadlineSeconds,
+      job.requestId,
+      job.traceparent,
+    ],
+  );
+}
+
+export async function markAwaitingConfirmation(
+  db: Db,
+  operationId: string,
+  reason: string,
+): Promise<OperationRecord> {
+  const result = await db.query<OperationRecord>(
+    `UPDATE operations SET status = 'awaiting_confirmation', reason = $2, updated_at = now()
+      WHERE id = $1
+      RETURNING ${OPERATION_COLUMNS}`,
+    [operationId, reason],
+  );
+  return firstRow(result.rows);
+}
+
+/** Hands the job back to the queue: lease cleared, due again after the delay. */
+export async function requeueJob(
+  db: Db,
+  job: { jobId: string; dueInMs: number; lastError: string },
+): Promise<void> {
+  await db.query(
+    `UPDATE jobs
+        SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+            due_at = now() + make_interval(secs => $2::float8 / 1000),
+            last_error = $3, updated_at = now()
+      WHERE id = $1`,
+    [job.jobId, job.dueInMs, job.lastError],
+  );
+}
