@@ -11,5 +11,24 @@ export {
 export type { ActiveSession, ClientKind, Merchant, MerchantRecord } from './repositories/auth';
 export { countAttempt, forgiveAttempt } from './repositories/login-throttle';
 export type { ThrottleKey } from './repositories/login-throttle';
+export {
+  consumeInjectedFault,
+  findProviderRequest,
+  insertAuthorizeNotReceived,
+  insertCharge,
+  insertProviderRequest,
+  lockCharge,
+  markChargeCaptured,
+  markChargeRefunded,
+  readSettlement,
+} from './repositories/provider';
+export type {
+  ChargeRow,
+  ChargeStatus,
+  InjectedFault,
+  ProviderCallKind,
+  ProviderRequestRow,
+  StoredOutcome,
+} from './repositories/provider';
 export { seed } from './seed';
 export { withTransaction } from './transaction';

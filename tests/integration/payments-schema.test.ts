@@ -80,7 +80,7 @@ describe('migration 002_payments on an empty database', () => {
     );
 
   it('applies both migrations once, and a second run does nothing', () => {
-    expect(firstRun).toEqual(['001_auth.sql', '002_payments.sql']);
+    expect(firstRun).toEqual(['001_auth.sql', '002_payments.sql', '003_provider.sql']);
     expect(secondRun).toEqual([]);
   });
 
