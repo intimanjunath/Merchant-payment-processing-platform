@@ -72,7 +72,9 @@ payment-processing/
 │   │       ├── tokens.ts        # Dependency-injection tokens
 │   │       ├── config/          # Environment validation (spec §8)
 │   │       ├── auth/            # Login, token issue, JWT/session checks, logout, CSRF, throttling
-│   │       ├── payments/        # HTTP routes, request validation, OpenAPI
+│   │       ├── payments/        # HTTP routes, request validation, OpenAPI, payment wiring
+│   │       ├── seed/            # Development payments, created through the payment services
+│   │       ├── cli/             # seed:payments entry point
 │   │       ├── health/          # Liveness, readiness and metrics routes
 │   │       └── common/          # Request IDs and consistent HTTP errors
 │   ├── worker/
@@ -101,7 +103,7 @@ payment-processing/
 │   ├── db/
 │   │   ├── src/                # Pool, transactions and SQL repositories
 │   │   ├── migrations/         # Application and fake-provider schemas
-│   │   └── seeds/              # Two development merchants
+│   │   └── seeds/              # Two development merchants (their payments: apps/api/src/seed)
 │   ├── config/src/             # Environment reading shared by the API and the worker
 │   ├── provider/src/           # Provider contract and durable fake adapter
 │   └── observability/src/      # JSON logger, metrics and trace context
@@ -161,7 +163,7 @@ Hash passwords with Argon2id. A successful login issues an eight-hour signed JWT
 
 Throttle failed attempts on both login endpoints in a PostgreSQL `login_attempts` table, keyed by normalized email and by client IP, so limits hold across API instances. The window length and both limits are configuration (`LOGIN_THROTTLE_WINDOW_SECONDS`, `LOGIN_THROTTLE_MAX_PER_EMAIL`, `LOGIN_THROTTLE_MAX_PER_IP`), defaulting to a fixed 15-minute window with 5 failures per email and 50 per IP. Each attempt is counted with one atomic increment before the password check, and refused if that pushes either count over its limit; a successful login clears the email's count and takes its own attempt back from the IP. Counting first means a burst of parallel guesses cannot all pass a read-then-record check before any failure is stored. Increments, resets and old-window cleanup each run in a short transaction that first takes a per-email, then a per-IP advisory lock, so they never lock rows in opposite orders and cannot deadlock. Tests use a short window so throttle tests cannot lock out the seeded merchants used by other tests. Return 429 with `Retry-After` and use generic credential errors.
 
-Every payment, operation and audit query uses merchant identity from the verified session. Another merchant's resource returns 404. Seed two development merchants for isolation tests.
+Every payment, operation and audit query uses merchant identity from the verified session. Another merchant's resource returns 404. Seed two development merchants for isolation tests. Their development payments are not SQL seeds: a script creates them through the same payment services as the API, with fixed idempotency keys, so each has real provider, operation and audit records and a re-run replays instead of duplicating.
 
 | Endpoint | Behavior |
 |---|---|
