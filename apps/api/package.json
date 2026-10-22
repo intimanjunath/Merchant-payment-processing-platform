@@ -5,7 +5,8 @@
   "description": "Merchant payment API.",
   "main": "dist/main.js",
   "scripts": {
-    "start": "node dist/main.js"
+    "start": "node dist/main.js",
+    "seed:payments": "node dist/cli/seed-payments.js"
   },
   "dependencies": {
     "@nestjs/common": "11.2.7",
