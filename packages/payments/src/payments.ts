@@ -5,13 +5,9 @@ import {
   type OperationRecord,
   type PaymentRecord,
 } from '@payments/db';
-import {
-  type PaymentProvider,
-  type ProviderResult,
-  ProviderTimeoutError,
-  ProviderUnavailableError,
-} from '@payments/provider';
+import type { PaymentProvider, ProviderResult } from '@payments/provider';
 
+import { WorkMismatchError } from './errors';
 import { type FinalizeDeps, finalizeOperation, scheduleRecovery, type WorkRef } from './finalize';
 import {
   type CreateInput,
@@ -21,7 +17,15 @@ import {
   reserveAction,
   reserveCreate,
 } from './reservation';
+import { callProvider, isProviderFailure, type ProviderFailure } from './provider-call';
 import { mutationResponse, type MutationResponse } from './resources';
+
+const callIds = (operation: OperationRecord, call: string) => ({
+  paymentId: operation.paymentId,
+  operationId: operation.id,
+  action: operation.action,
+  call,
+});
 
 export interface PaymentDeps extends ReservationDeps, FinalizeDeps {
   provider: PaymentProvider;
@@ -29,7 +33,7 @@ export interface PaymentDeps extends ReservationDeps, FinalizeDeps {
   recoveryDelayMs: number;
 }
 
-type ProviderCall = ProviderResult | { failure: 'provider_timeout' | 'provider_unavailable' };
+type ProviderCall = ProviderResult | ProviderFailure;
 
 /** POST /payments: reserve, authorize with nothing locked, then finalize or schedule recovery. */
 export async function createPayment(
@@ -41,7 +45,7 @@ export async function createPayment(
   if (reservation.kind === 'replay') return replayResponse(reservation);
 
   const { payment, operation, job } = reservation;
-  const call = await callProvider(deps, operation, () =>
+  const call = await callProvider(deps.logger, callIds(operation, 'authorize'), () =>
     deps.provider.authorize({
       providerKey: operation.providerKey,
       token: payment.paymentMethodToken,
@@ -85,56 +89,10 @@ async function runAction(
     chargeId,
     amountCents: payment.amountCents,
   };
-  const call = await callProvider(deps, operation, () =>
+  const call = await callProvider(deps.logger, callIds(operation, input.action), () =>
     input.action === 'capture' ? deps.provider.capture(request) : deps.provider.refund(request),
   );
   return conclude(deps, { payment, operation, job }, call);
-}
-
-/**
- * Runs one provider call. No transaction is open and no row is locked while
- * it runs. Timeouts and transport failures become "outcome unknown"; any
- * other error propagates, and the leased job lets the worker recover after
- * the lease expires.
- */
-async function callProvider(
-  deps: PaymentDeps,
-  operation: OperationRecord,
-  call: () => Promise<ProviderResult>,
-): Promise<ProviderCall> {
-  const started = performance.now();
-  const ids = {
-    paymentId: operation.paymentId,
-    operationId: operation.id,
-    action: operation.action,
-  };
-  const durationMs = () => Math.round(performance.now() - started);
-  try {
-    const result = await call();
-    deps.logger.debug(
-      {
-        event: 'provider.call.completed',
-        ...ids,
-        outcome: result.outcome,
-        durationMs: durationMs(),
-      },
-      'Provider call completed',
-    );
-    return result;
-  } catch (error) {
-    const failure =
-      error instanceof ProviderTimeoutError
-        ? 'provider_timeout'
-        : error instanceof ProviderUnavailableError
-          ? 'provider_unavailable'
-          : undefined;
-    if (!failure) throw error;
-    deps.logger.warn(
-      { event: 'provider.call.completed', ...ids, outcome: failure, durationMs: durationMs() },
-      'Provider call failed; outcome unknown',
-    );
-    return { failure };
-  }
 }
 
 /** After the call: finalize a definitive answer, or schedule recovery for an unknown one. */
@@ -150,7 +108,7 @@ async function conclude(
     generation: reserved.job.leaseGeneration,
   };
 
-  if ('failure' in call) {
+  if (isProviderFailure(call)) {
     await scheduleRecovery(deps, work, { reason: call.failure, delayMs: deps.recoveryDelayMs });
   } else {
     const result = await finalizeOperation(deps, work, call);
@@ -164,7 +122,9 @@ async function conclude(
       findPayment(deps.pool, ref.paymentId),
       findOperation(deps.pool, ref.operationId),
     ]);
-    if (!payment || !operation) throw new Error('Reserved work disappeared');
+    if (!payment || !operation) {
+      throw new WorkMismatchError(`reserved work for operation ${ref.operationId} is missing`);
+    }
     return replayResponse({ kind: 'replay', payment, operation });
   }
 }

@@ -24,6 +24,7 @@ export {
   PaymentError,
   PaymentNotFoundError,
   UnknownPaymentMethodError,
+  WorkMismatchError,
 } from './errors';
 export type { PaymentErrorCode } from './errors';
 export { actionRequestHash, createRequestHash, requestHash } from './request-hash';
@@ -50,3 +51,5 @@ export { listPaymentsPage } from './list';
 export type { ListQuery } from './list';
 export { claimJobs, JOB_TYPES, renewJobLease } from './jobs';
 export type { JobType } from './jobs';
+export { recoverOperation, retryDelayMs } from './recovery';
+export type { RecoveryDeps, RecoveryOutcome } from './recovery';

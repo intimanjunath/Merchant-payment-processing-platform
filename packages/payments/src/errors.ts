@@ -55,3 +55,15 @@ export class InvalidCursorError extends InvalidInputError {
     super('cursor', 'is not valid for this query');
   }
 }
+
+/**
+ * A job, operation and payment that don't describe the same work: a bug or
+ * corrupted data, never a client error. Raised before any provider call or
+ * write, or inside a transaction so it rolls back; nothing is changed.
+ */
+export class WorkMismatchError extends Error {
+  constructor(readonly detail: string) {
+    super(`Job and operation do not describe the same work: ${detail}`);
+    this.name = 'WorkMismatchError';
+  }
+}

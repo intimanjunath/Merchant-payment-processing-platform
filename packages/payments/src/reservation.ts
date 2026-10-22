@@ -24,6 +24,7 @@ import {
   OperationInProgressError,
   PaymentNotFoundError,
   UnknownPaymentMethodError,
+  WorkMismatchError,
 } from './errors';
 import { canonicalPaymentId } from './ids';
 import { actionRequestHash, createRequestHash } from './request-hash';
@@ -230,7 +231,8 @@ async function replayOrConflict(
     throw new IdempotencyConflictError(operation.id);
   }
   const payment = await findPayment(client, operation.paymentId);
-  if (!payment) throw new Error('Operation refers to a missing payment');
+  if (!payment)
+    throw new WorkMismatchError(`operation ${operation.id} refers to a missing payment`);
   deps.logger.debug(
     {
       event: 'idempotency.replayed',

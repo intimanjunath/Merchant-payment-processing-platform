@@ -1,6 +1,7 @@
 import {
   completeJob,
   insertAuditEvent,
+  type JobRecord,
   insertSettlementJob,
   lockOperation,
   lockJob,
@@ -18,6 +19,7 @@ import {
 import type { Logger } from '@payments/observability';
 import type { Pool, PoolClient } from 'pg';
 
+import { WorkMismatchError } from './errors';
 import { mutationResponse, type MutationResponse, rejectionResponse } from './resources';
 import {
   InvalidStateTransitionError,
@@ -146,7 +148,9 @@ export async function finalizeOperation(
     const payment = await lockPayment(client, work.paymentId);
     const operation = await lockOperation(client, work.operationId);
     if (!payment || operation?.paymentId !== payment.id) {
-      throw new Error('Finalize called for an operation that does not belong to the payment');
+      throw new WorkMismatchError(
+        `operation ${work.operationId} is missing or is not payment ${work.paymentId}'s`,
+      );
     }
     const ownership = await checkOwnership(client, work, operation);
     if (ownership) return { kind: ownership };
@@ -235,7 +239,7 @@ export async function scheduleRecovery(
 ): Promise<ScheduleResult> {
   const outcome = await withTransaction(deps.pool, async (client): Promise<ScheduleResult> => {
     const operation = await lockOperation(client, work.operationId);
-    if (!operation) throw new Error('Operation to reschedule does not exist');
+    if (!operation) throw new WorkMismatchError(`operation ${work.operationId} does not exist`);
     const ownership = await checkOwnership(client, work, operation);
     if (ownership) return { kind: ownership };
 
@@ -267,20 +271,40 @@ export async function scheduleRecovery(
 
 /**
  * Locks the job (after payment and operation) and says why the caller must
- * stop, if it must. The lease generation decides first: a different one means
- * another owner claimed the job since, whatever state the operation is in, so
- * a late answer from an expired owner is always reported as a lost lease.
- * Only the current owner can see its own work as already final.
+ * stop, if it must. First, the job must be this operation's recovery job and
+ * the operation this payment's; anything else is a WorkMismatchError, which
+ * rolls the transaction back. Then the lease generation decides: a different
+ * one means another owner claimed the job since, whatever state the operation
+ * is in, so a late answer from an expired owner is always reported as a lost
+ * lease. Only the current owner can see its own work as already final.
  */
-async function checkOwnership(
+export async function checkOwnership(
   client: PoolClient,
   work: WorkRef,
   operation: OperationRecord,
 ): Promise<'lease_lost' | 'already_final' | undefined> {
   const job = await lockJob(client, work.jobId);
-  if (job?.leaseGeneration !== work.generation) return 'lease_lost';
+  if (!job) throw new WorkMismatchError(`job ${work.jobId} does not exist`);
+  assertSameWork(job, operation, work);
+  if (job.leaseGeneration !== work.generation) return 'lease_lost';
   if (RESOLVED.includes(operation.status) || job.status !== 'running') return 'already_final';
   return undefined;
+}
+
+/** Throws unless job, operation and work reference all name the same operation and payment. */
+export function assertSameWork(job: JobRecord, operation: OperationRecord, work: WorkRef): void {
+  if (job.type !== 'operation_recovery')
+    throw new WorkMismatchError(`job ${job.id} is a ${job.type} job`);
+  if (job.operationId !== work.operationId || operation.id !== work.operationId) {
+    throw new WorkMismatchError(
+      `job ${job.id} belongs to operation ${String(job.operationId)}, not ${work.operationId}`,
+    );
+  }
+  if (job.paymentId !== work.paymentId || operation.paymentId !== work.paymentId) {
+    throw new WorkMismatchError(
+      `operation ${operation.id} and job ${job.id} do not both belong to payment ${work.paymentId}`,
+    );
+  }
 }
 
 /** Logged after commit, so a line never describes work that rolled back. */

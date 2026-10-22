@@ -605,3 +605,51 @@ export async function renewLease(
   );
   return result.rowCount === 1;
 }
+
+// Recovery outcomes (step 13). Callers lock operation → job and check the lease generation first.
+
+/** Back to the queue after a failed attempt: lease cleared, failure count recorded, due after the backoff. */
+export async function rescheduleJob(
+  db: Db,
+  job: { jobId: string; dueInMs: number; consecutiveFailures: number; lastError: string },
+): Promise<void> {
+  await db.query(
+    `UPDATE jobs
+        SET status = 'queued', lease_owner = NULL, lease_expires_at = NULL,
+            due_at = now() + make_interval(secs => $2::float8 / 1000),
+            consecutive_failures = $3, last_error = $4, updated_at = now()
+      WHERE id = $1`,
+    [job.jobId, job.dueInMs, job.consecutiveFailures, job.lastError],
+  );
+}
+
+/** Stops automatic processing: the job waits, with its reason, until an operator resumes it. */
+export async function pauseJob(
+  db: Db,
+  job: { jobId: string; reason: string; consecutiveFailures: number; lastError: string | null },
+): Promise<void> {
+  await db.query(
+    `UPDATE jobs
+        SET status = 'paused', lease_owner = NULL, lease_expires_at = NULL,
+            paused_reason = $2, consecutive_failures = $3, last_error = coalesce($4, last_error),
+            updated_at = now()
+      WHERE id = $1`,
+    [job.jobId, job.reason, job.consecutiveFailures, job.lastError],
+  );
+}
+
+/** The dead-letter state for an operation: unresolved, blocking new mutations, needing a person. */
+export async function markNeedsReview(db: Db, operationId: string, reason: string): Promise<void> {
+  await db.query(
+    `UPDATE operations SET status = 'needs_review', reason = $2, updated_at = now() WHERE id = $1`,
+    [operationId, reason],
+  );
+}
+
+/** The job row as stored, unlocked; used to check a claimed record still describes the same work. */
+export async function findJob(db: Db, jobId: string): Promise<JobRecord | undefined> {
+  const result = await db.query<JobRecord>(`SELECT ${JOB_COLUMNS} FROM jobs WHERE id = $1`, [
+    jobId,
+  ]);
+  return result.rows[0];
+}
