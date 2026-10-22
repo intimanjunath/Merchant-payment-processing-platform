@@ -7,7 +7,7 @@ import MenuItem from '@mui/material/MenuItem';
 import TextField from '@mui/material/TextField';
 import Typography from '@mui/material/Typography';
 import { useCallback, useEffect, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { Link as RouterLink, useSearchParams } from 'react-router';
 
 import { PaymentTable } from '../components/PaymentTable';
 import { ApiRequestError } from '../lib/api';
@@ -93,9 +93,23 @@ export function PaymentsPage() {
 
   return (
     <>
-      <Typography variant="h2" component="h1" sx={{ mb: 1 }}>
-        Payments
-      </Typography>
+      <Box
+        sx={{
+          display: 'flex',
+          alignItems: 'baseline',
+          justifyContent: 'space-between',
+          gap: 2,
+          flexWrap: 'wrap',
+          mb: 1,
+        }}
+      >
+        <Typography variant="h2" component="h1">
+          Payments
+        </Typography>
+        <Button component={RouterLink} to="/payments/new" variant="contained">
+          New payment
+        </Button>
+      </Box>
       <Typography color="text.secondary" sx={{ mb: 3 }}>
         Newest first. Search by your reference, or narrow the list to one status.
       </Typography>

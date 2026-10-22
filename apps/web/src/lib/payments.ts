@@ -207,3 +207,20 @@ export function reachedAt(transitions: Transition[]): Partial<Record<PaymentStat
   for (const transition of transitions) reached[transition.toState] = transition.occurredAt;
   return reached;
 }
+
+/** The API's amount range in cents (design §10): $0.01 to $1,000,000.00. */
+export const AMOUNT_MIN_CENTS = 1;
+export const AMOUNT_MAX_CENTS = 100_000_000;
+
+/**
+ * Dollars as typed ("12.5", "$1,299.00") to integer cents, without floating
+ * point; null for anything that isn't an amount in the API's range.
+ */
+export function parseAmount(text: string): number | null {
+  const cleaned = text.trim().replace(/^\$/, '').replaceAll(',', '');
+  const match = /^(\d{1,7})(?:\.(\d{1,2}))?$/.exec(cleaned);
+  if (!match) return null;
+  const [, whole = '0', fraction = ''] = match;
+  const cents = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+  return cents >= AMOUNT_MIN_CENTS && cents <= AMOUNT_MAX_CENTS ? cents : null;
+}

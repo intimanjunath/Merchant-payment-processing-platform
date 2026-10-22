@@ -222,4 +222,18 @@ describe('PaymentDetailsController', () => {
     controller.dispose();
     expect(timers.live()).toHaveLength(0);
   });
+
+  it('cannot be revived by a stray refresh after dispose; only start() resumes it', async () => {
+    controller.refresh();
+    await answer(details('captured'));
+    controller.dispose();
+
+    controller.refresh();
+    controller.visible();
+    expect(api.calls).toHaveLength(1);
+    expect(timers.live()).toHaveLength(0);
+
+    controller.start();
+    expect(api.calls).toHaveLength(2);
+  });
 });

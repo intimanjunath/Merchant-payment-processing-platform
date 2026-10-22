@@ -55,9 +55,15 @@ export class PaymentDetailsController {
 
   readonly getState = (): DetailsState => this.state;
 
-  /** Loads now; also the retry after a failure. */
-  refresh(): void {
+  /** The page is showing this payment: load now and poll while unresolved. */
+  start(): void {
     this.disposed = false;
+    this.refresh();
+  }
+
+  /** Loads now; also the retry after a failure. Does nothing once disposed. */
+  refresh(): void {
+    if (this.disposed) return;
     this.clearTimer();
     this.dueWhileHidden = false;
     this.load();
@@ -68,7 +74,7 @@ export class PaymentDetailsController {
     if (this.dueWhileHidden && !this.disposed) this.refresh();
   }
 
-  /** Stops polling and abandons the request in flight. refresh() starts again. */
+  /** Stops polling and abandons the request in flight; only start() brings it back. */
   dispose(): void {
     this.disposed = true;
     this.clearTimer();

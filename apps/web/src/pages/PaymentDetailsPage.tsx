@@ -8,6 +8,7 @@ import type { ReactNode } from 'react';
 import { Link as RouterLink, useLocation, useParams } from 'react-router';
 
 import { LifecycleRail } from '../components/LifecycleRail';
+import { PaymentActions } from '../components/PaymentActions';
 import { PaymentStatus } from '../components/PaymentStatus';
 import { ApiRequestError } from '../lib/api';
 import {
@@ -27,6 +28,7 @@ import {
   STATE_LABELS,
   type Transition,
 } from '../lib/payments';
+import { usePaymentActions } from '../lib/use-payment-actions';
 import { usePaymentDetails } from '../lib/use-payment-details';
 import { tokens } from '../theme';
 
@@ -49,6 +51,11 @@ function BackLink() {
 
 function DetailsView({ paymentId }: { paymentId: string }) {
   const { state, refresh } = usePaymentDetails(paymentId);
+  const actions = usePaymentActions(
+    paymentId,
+    state.status === 'ready' ? state.details : null,
+    refresh,
+  );
 
   let body: ReactNode;
   if (state.status === 'loading') {
@@ -91,7 +98,20 @@ function DetailsView({ paymentId }: { paymentId: string }) {
       </Alert>
     );
   } else {
-    body = <Details details={state.details} refreshFailed={state.refreshFailed} />;
+    body = (
+      <Details
+        details={state.details}
+        refreshFailed={state.refreshFailed}
+        actions={
+          <PaymentActions
+            details={state.details}
+            actions={actions.state}
+            onStart={actions.start}
+            onRetry={actions.retry}
+          />
+        }
+      />
+    );
   }
 
   return (
@@ -104,7 +124,16 @@ function DetailsView({ paymentId }: { paymentId: string }) {
   );
 }
 
-function Details({ details, refreshFailed }: { details: PaymentDetails; refreshFailed: boolean }) {
+function Details({
+  details,
+  refreshFailed,
+  actions,
+}: {
+  details: PaymentDetails;
+  refreshFailed: boolean;
+  /** Capture or refund, with its messages. */
+  actions: ReactNode;
+}) {
   const { payment, pendingOperation } = details;
   const live = isUnresolved(details);
   return (
@@ -147,6 +176,7 @@ function Details({ details, refreshFailed }: { details: PaymentDetails; refreshF
             Couldn’t check for updates just now. Showing the details as they were; still trying.
           </Alert>
         )}
+        {actions}
       </Box>
 
       <Section>

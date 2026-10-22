@@ -29,7 +29,7 @@ export function usePaymentDetails(paymentId: string): {
   const state = useSyncExternalStore(controller.subscribe, controller.getState);
 
   useEffect(() => {
-    controller.refresh();
+    controller.start();
     const onVisibilityChange = () => {
       if (document.visibilityState === 'visible') controller.visible();
     };

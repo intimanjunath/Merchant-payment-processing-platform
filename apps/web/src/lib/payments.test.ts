@@ -9,6 +9,7 @@ import {
   normalizeSearch,
   type Payment,
   type PaymentDetails,
+  parseAmount,
   paymentListPath,
   reachedAt,
   reasonLabel,
@@ -153,5 +154,21 @@ describe('details helpers', () => {
     expect(reasonLabel('settlement_confirmed')).toBe('Funds reached your account');
     expect(reasonLabel('something_new')).toBe('something_new');
     expect(reasonLabel(null)).toBeNull();
+  });
+});
+
+describe('parseAmount', () => {
+  it('turns typed dollars into integer cents', () => {
+    expect(parseAmount('12.5')).toBe(1250);
+    expect(parseAmount('$1,299.00')).toBe(129_900);
+    expect(parseAmount(' 0.01 ')).toBe(1);
+    expect(parseAmount('1000000')).toBe(100_000_000);
+    expect(parseAmount('0.29')).toBe(29);
+  });
+
+  it('refuses anything outside the API’s range or not an amount', () => {
+    for (const text of ['', '0', '0.00', '1000000.01', '1.234', '-5', 'abc', '1e3', '12.', '.5']) {
+      expect(parseAmount(text)).toBeNull();
+    }
   });
 });
