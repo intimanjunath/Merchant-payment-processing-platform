@@ -34,7 +34,7 @@ flowchart LR
         TDB[(test-db: PostgreSQL 18<br/>:5433, durability off)]
     end
     B -->|HTTP, same origin| WEB
-    WEB -->|proxy /auth, /payments| API
+    WEB -->|proxy /api/*, prefix stripped| API
     C -->|Bearer JWT| API
     API -->|app schema + provider schema| DB
     WRK -->|app schema + provider schema| DB
@@ -79,7 +79,7 @@ Rules: lifecycle decisions live only in `packages/payments`. Controllers and wor
 
 | Service | Port | Purpose |
 |---|---|---|
-| web | 5173 | Dashboard (Vite dev server with proxy) |
+| web | 5173 | Dashboard (Vite dev server; `/api/*` is proxied to the API with the prefix stripped, so every other path, such as `/payments/:id`, stays a dashboard page on reload) |
 | api | 3000 | Merchant API, `/health`, `/ready`, `/metrics` |
 | worker | 3001 | `/health`, `/ready`, `/metrics` only |
 | db | 5432 | Development database |
