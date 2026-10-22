@@ -5,7 +5,10 @@
     "declaration": false,
     "declarationMap": false,
     "noEmit": true,
-    "types": ["node", "jest"]
+    "types": ["node", "jest"],
+    "paths": {
+      "@payments/*": ["../../packages/*/src"]
+    }
   },
   "include": ["src"]
 }
