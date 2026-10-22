@@ -511,7 +511,7 @@ Body is empty or `{}`; any field is a 400. Request hash input: `{ action, paymen
 { "items": [ { "...": "Payment" } ], "nextCursor": "eyJ2IjoxLCJ0Ijoi..." }
 ```
 
-Order: `created_at DESC, id DESC`. `nextCursor` is `null` on the last page. A cursor is `base64url(JSON {v, createdAt, id, filterHash})` plus an HMAC signature using `CURSOR_SECRET`. `filterHash` covers merchant, `status` and `q`. A tampered cursor, or one used with different filters, returns 400.
+Order: `created_at DESC, id DESC`. `nextCursor` is `null` on the last page. A cursor is `base64url(JSON {v, createdAt, id, filterHash})`, a `.`, and `base64url(HMAC-SHA256(CURSOR_SECRET, payload))`; `createdAt` has microseconds. `filterHash` is SHA-256 of `[merchantId, status, q]` (missing ones as `null`). The signature is checked first, in constant time. A tampered cursor, one used with different filters or by another merchant, or one longer than 512 characters returns 400 with `fields: [{ field: 'cursor', issue: 'is not valid for this query' }]`. Unknown query parameters return 400 like unknown body fields. A rule message shared by several broken rules is listed once.
 
 ### 4.5 Health and metrics
 
@@ -864,14 +864,18 @@ The `failure_reason` check constraint means state and reason must change togethe
 **List payments** (search with `q`, next page with cursor):
 
 ```sql
-SELECT * FROM payments
+SELECT <payment columns>,
+       to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS cursor_created_at
+FROM payments
 WHERE merchant_id = $1
   AND ($2::text IS NULL OR state = $2)
-  AND ($3::text IS NULL OR reference ILIKE '%' || $3 || '%' ESCAPE '\')
-  AND ($4::timestamptz IS NULL OR (created_at, id) < ($4, $5))
+  AND ($3::text IS NULL OR reference ILIKE $3 ESCAPE '\')   -- $3 = '%' || escaped q || '%'
+  AND ($4::timestamptz IS NULL OR (created_at, id) < ($4::timestamptz, $5::uuid))
 ORDER BY created_at DESC, id DESC
-LIMIT $6 + 1;   -- one extra row tells whether nextCursor is needed
+LIMIT $6;   -- the page size + 1: one extra row tells whether nextCursor is needed
 ```
+
+`q` has `\`, `%` and `_` escaped with a backslash before it is wrapped in `%`, so they match themselves. The cursor carries `created_at` to the microsecond (`cursor_created_at`), because a JavaScript `Date` keeps only milliseconds and a rounded key would skip or repeat rows created within one millisecond. The query text is exported as `LIST_PAYMENTS_SQL`, and a test runs `EXPLAIN` on it.
 
 The trigram index helps when `q` has 3 or more characters; shorter searches fall back to the merchant index.
 
