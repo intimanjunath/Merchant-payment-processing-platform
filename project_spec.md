@@ -963,20 +963,20 @@ Redaction is by key name at any depth, including inside serialized errors and th
 |---|---|---|---|
 | `http_requests_total` | counter | `method`, `route`, `status_class` | API, worker health server |
 | `http_request_duration_seconds` | histogram | `method`, `route`, `status_class` | API |
-| `payment_transitions_total` | counter | `from_state`, `to_state` | Process that committed |
+| `payment_transitions_total` | counter | `from_state` (`none` for creation), `to_state` | Process that committed |
 | `payments_by_state` | gauge | `state` | Worker collector only |
 | `idempotency_replays_total` | counter | `action` | API |
 | `idempotency_conflicts_total` | counter | `action` | API |
-| `provider_requests_total` | counter | `operation`, `outcome` (`succeeded`, `rejected`, `timeout`, `unavailable`) | API, worker |
+| `provider_requests_total` | counter | `operation` (`authorize`, `capture`, `refund`, `lookup`, `getSettlement`), `outcome` (`succeeded`, `rejected`, `timeout`, `unavailable`): how the call went, so a "not received" or "pending" answer is `succeeded` | API, worker |
 | `provider_request_duration_seconds` | histogram | `operation` | API, worker |
 | `jobs_due` | gauge | `type` | Worker collector (queue depth) |
 | `jobs_lag_seconds` | gauge | `type` | Worker collector (age of the oldest due job) |
 | `jobs_paused` | gauge | `type` | Worker collector (dead-letter backlog) |
-| `job_runs_total` | counter | `type`, `result` (`completed`, `rescheduled`, `retried`, `paused`, `lease_lost`) | Worker, API |
+| `job_runs_total` | counter | `type`, `result` (`completed`, `rescheduled`, `retried`, `paused`, `lease_lost`, `version_conflict`, `failed`). Each run counts exactly once: by its result (a run that finds the work already finished counts as `completed`), or `failed` if the attempt throws (the error is then rethrown; no message or class is ever a label). The API counts its own run of a recovery job (provider call plus finalize or reschedule); a run that already recorded a result is not counted again if something throws afterwards | Worker, API |
 | `operations_unresolved_oldest_age_seconds` | gauge | — | Worker collector |
 | `worker_heartbeat_timestamp_seconds` | gauge | — | Worker |
 
-Labels never contain payment IDs, merchant IDs or references. Database-wide gauges are computed by a single collector in the worker, so running several API instances does not double-count them.
+Labels never contain payment IDs, merchant IDs or references. The worker's collector reads all its gauges in one query per scrape, reports every state and job type (0 when empty), counts expired running leases as due, and keeps its last values if the read fails. Database-wide gauges are computed by a single collector in the worker, so running several API instances does not double-count them.
 
 ## 8. Configuration
 
