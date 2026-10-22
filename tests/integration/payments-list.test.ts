@@ -5,14 +5,9 @@ import argon2 from 'argon2';
 import type { Pool } from 'pg';
 import request from 'supertest';
 
-import {
-  clearLoginAttempts,
-  migrateTestDatabase,
-  startTestApi,
-  type TestApi,
-} from '../helpers/api';
+import { startTestApi, type TestApi } from '../helpers/api';
 import { conforms } from '../helpers/openapi';
-import { testDatabaseUrl } from '../helpers/test-db';
+import { createScratchDatabase } from '../helpers/test-db';
 
 const PASSWORD = 'list-test-password';
 
@@ -22,6 +17,7 @@ interface ListBody {
 }
 
 describe('GET /payments', () => {
+  let scratch: { url: string; drop: () => Promise<void> };
   let api: TestApi;
   let db: Pool;
   const merchants: { id: string; token: string }[] = [];
@@ -97,22 +93,18 @@ describe('GET /payments', () => {
     throw new Error('paging did not end');
   }
 
+  // A database of its own: the suite inserts hundreds of rows, and deleting them from the
+  // shared test database (whose jobs table grows run after run) outlasted the hook timeout.
   beforeAll(async () => {
-    await migrateTestDatabase({ seed: true });
-    await clearLoginAttempts();
-    api = await startTestApi();
-    db = createPool(testDatabaseUrl(), { applicationName: 'payments-list-test', max: 2 });
+    scratch = await createScratchDatabase({ seed: true });
+    api = await startTestApi({ databaseUrl: scratch.url });
+    db = createPool(scratch.url, { applicationName: 'payments-list-test', max: 2 });
   });
 
   afterAll(async () => {
-    // These merchants' payments have no operations or audit rows, so they can be removed.
-    for (const merchant of merchants) {
-      await db.query('DELETE FROM payments WHERE merchant_id = $1', [merchant.id]);
-      await db.query('DELETE FROM sessions WHERE merchant_id = $1', [merchant.id]);
-      await db.query('DELETE FROM merchants WHERE id = $1', [merchant.id]);
-    }
     await db.end();
     await api.app.close();
+    await scratch.drop();
   });
 
   describe('paging', () => {
