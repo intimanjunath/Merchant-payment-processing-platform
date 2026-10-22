@@ -1,342 +1,598 @@
-# Payment Processing Platform: Final Design
+# Payment Processing Platform: Design
 
-## 1. Scope
+## 1. Overview
 
-Build a small merchant payment platform with an authenticated API, a dashboard and a separate background worker. The source requirements are in `Software_Engineer-Technical_Exercise-Payment_Processing_Platform.md`.
+### 1.1 Scope
 
-A merchant logs in, creates and captures payments, watches them settle and requests full refunds after settlement. A fake provider, driven by test payment-method tokens, makes success, decline and uncertain outcomes reproducible without external keys.
+A merchant payment platform with an authenticated REST API, a web dashboard and a background worker. A merchant signs in, creates payments, captures them, sees them settle and refunds them. A simulated provider, driven by test payment-method tokens, produces approvals, declines, timeouts and lost responses deterministically, without external credentials.
 
-**Included:** browser and API-client login/logout, payment creation/details/list/search, capture, full refund, settlement, recovery, audit and operation history, idempotency, logs, metrics and health checks.
+The design prioritizes correctness under failure: idempotent mutations, no double charges under retries or concurrency, recovery of indeterminate provider outcomes, an append-only audit trail, and a visible dead-letter state for work that cannot be resolved automatically.
 
-**Deferred:** see §12, Future improvements.
+| In scope | Out of scope |
+|---|---|
+| Browser and API-client authentication | Customer checkout and card tokenization (provider-side) |
+| Create, capture, full refund, details, list and search | Partial captures and refunds, cancellation, multiple currencies |
+| Settlement confirmation and recovery workflows | Outbound webhooks, reconciliation reports |
+| Idempotency, audit, logs, metrics, trace propagation, health checks | A deployed tracing backend, alerting |
+| Local deployment with Docker Compose | TLS, production infrastructure |
 
-This document describes the design. Once the application is built, `README.md` will hold setup commands, the implemented subset and actual test results.
+### 1.2 Requirements coverage
 
-## 2. Architecture and choices
+Every requirement in the brief (`Software_Engineer-Technical_Exercise-Payment_Processing_Platform.md`) is met. The table states how, in one line each, and where the detail is. Exact contracts are in `project_spec.md` (its §9 maps them to the brief); setup and operation are in `README.md`.
+
+**Functional (brief §3)**
+
+| Requirement | How it is met | Section |
+|---|---|---|
+| Log in to a merchant account | `POST /auth/login` (browser cookie) and `POST /auth/token` (Bearer for API clients) | §4.1 |
+| Validate each request; expire the login | Signed JWT plus a server-side session checked on every request; 8-hour expiry; logout revokes | §4.1 |
+| Create, retrieve, capture, refund | REST endpoints, each mutation idempotent | §4.2, §5.2 |
+| List and search | Status filter, reference substring search, cursor pagination | §4.2 |
+| Lifecycle Pending → Authorized → Captured → Settled, with Failed and Refunded | One transition table; any other move is rejected | §3 |
+| At least one asynchronous workflow | Two, run by the worker: settlement confirmation and recovery of uncertain provider outcomes | §7 |
+| Dashboard: log in, view, filter and search, details and statuses | React dashboard; also creates, captures and refunds | §8 |
+
+**Observability and operations (brief §4)**
+
+| Requirement | How it is met | Section |
+|---|---|---|
+| Structured logs | JSON lines with a named event per line | §9.1 |
+| Correlation ID across the API and the async workflow | Request ID stored on operations and jobs and logged by the worker | §9.1 |
+| Deliberate log levels | info for transitions, warn for retries, error for dead-lettered work, debug for polling | §9.1 |
+| No sensitive data in logs | Key-based redaction; bodies never logged; card data never accepted | §3.1, §9.1 |
+| RED metrics | Request rate, errors and latency per route | §9.2 |
+| Business metrics by state | Transition counters and a gauge per state | §9.2 |
+| Queue depth, lag, retries and failures | `jobs_due`, `jobs_lag_seconds`, `job_runs_total`, `jobs_paused` | §9.2 |
+| Trace across the API and async work | W3C trace context carried on the job and continued by the worker; adoption path for OpenTelemetry | §9.3 |
+| Health and readiness endpoints | `/health` and `/ready` on the API and the worker | §9.4 |
+| Audit trail of state transitions | One row per transition: who, when, from, to, why | §9.5 |
+| Consistent errors | One error envelope and a fixed code table | §4.3 |
+| Idempotent create, capture and refund | `Idempotency-Key` with stored responses | §5.2 |
+| Retries, timeouts, dead-letter | 5 s timeout, 3 retries with backoff, then `needs_review` | §6, §7 |
+
+**Engineering quality and documentation (brief §5–6)**
+
+| Requirement | How it is met | Section |
+|---|---|---|
+| Architecture and code organization | Apps for each process; rules, data access, provider and observability in shared packages | §2 |
+| API design | Consistent resources, status codes and errors; OpenAPI document checked by tests | §4 |
+| Scalability | Stateless API, horizontally scalable worker, indexed queries | §11 |
+| Security | Hashed passwords, session checks, CSRF, throttling, tenant isolation, no card data | §10 |
+| Testing strategy | Unit, integration, contract, concurrency, fault-injection and crash-recovery tests | §12 |
+| Setup instructions | One command with Docker Compose | README |
+| Architecture overview; tradeoffs | Diagrams and a decision table | §2 |
+| Assumptions; production considerations; future improvements | Dedicated sections | §13, §14, §15 |
+
+## 2. Architecture
+
+### 2.1 System context and containers
 
 ```mermaid
 flowchart LR
-    UI[React dashboard] --> API[NestJS API]
-    CLI[API client] --> API
-    API --> DB[(PostgreSQL)]
-    W[Background worker] --> DB
-    API --> P[Fake provider adapter]
-    W --> P
-    P --> PD[(Separate provider schema)]
+    merchant([Merchant<br/>browser])
+    client([API client])
+
+    subgraph platform [Payment platform]
+        web[web<br/>nginx + React SPA]
+        api[api<br/>NestJS]
+        worker[worker<br/>Node.js]
+        db[(PostgreSQL<br/>public schema)]
+    end
+
+    subgraph simulated [Simulated provider]
+        provider[packages/provider<br/>in-process library]
+        pdb[(PostgreSQL<br/>provider schema)]
+    end
+
+    merchant -->|HTTPS in production<br/>cookie + CSRF| web
+    web -->|/api proxy| api
+    client -->|Bearer JWT| api
+    api -->|SQL| db
+    worker -->|SQL, SKIP LOCKED claims| db
+    api -->|authorize, capture, refund| provider
+    worker -->|lookup, re-send, settlement status| provider
+    provider --> pdb
 ```
 
-The API and worker share payment services. Controllers handle HTTP, services enforce business rules, and repositories hold parameterized SQL. Provider calls run outside application database transactions.
+| Container | Responsibility | Does not |
+|---|---|---|
+| `web` | Dashboard SPA; nginx serves static assets and proxies `/api` to the API | Access the database or provider; decide lifecycle rules |
+| `api` | Authentication, validation, idempotency, reservation, synchronous provider call, finalization, read endpoints | Run background polling |
+| `worker` | Claims due jobs; recovers indeterminate outcomes; confirms settlement; publishes queue gauges | Serve merchant traffic |
+| PostgreSQL | System of record, job queue and audit log | — |
+| Provider | Deterministic fake with durable state in its own schema and its own transactions, so its effects survive application rollbacks as an external provider's would | — |
 
-| Choice | Reason and tradeoff |
-|---|---|
-| React, TypeScript, Vite and MUI | Suitable for forms, tables and details. Existing components reduce UI work; accessibility still needs checking. Server rendering is unnecessary for this dashboard. |
-| Node.js, TypeScript and NestJS | One language and consistent modules for authentication, payments, provider and jobs. More framework setup than Express, but clearer conventions. |
-| PostgreSQL with `pg` and SQL migrations | Transactions, constraints and locks keep payment changes consistent. Direct SQL makes those boundaries visible, at the cost of handwritten queries. |
-| One PostgreSQL jobs table and a separate worker | No additional broker. Claim with `SELECT ... FOR UPDATE SKIP LOCKED`, poll every five seconds and implement bounded retry rules. Unlike a queue library, job recovery is our responsibility; keep it limited to this exercise. |
-| JWT plus server-side session | Signed identity with explicit expiry and logout revocation. Browsers carry it in an HttpOnly cookie; API clients send it as a Bearer header. Every request still needs a session lookup; this is intentionally not stateless authentication. |
-| Fake provider with test tokens | Predictable outcomes and restart tests. It does not demonstrate a real provider integration. |
-| Pino, the Prometheus client (`@prometheus-io/client`, successor to `prom-client`) and trace-context propagation | Structured logs, metrics and a path to tracing. Exporter/backend deployment is optional. |
+All lifecycle rules live in `packages/payments`; the API controllers and worker handlers only translate HTTP requests or jobs into calls on it. SQL lives only in `packages/db`.
 
-This document records decisions and tradeoffs. The exact contracts the code must match are in `project_spec.md`: component and package boundaries, sequence diagrams for each flow, request and response shapes, database DDL, provider contract, log events, metric names and configuration.
+### 2.2 Technology decisions
 
-Organize code into `apps/api`, `apps/worker`, `apps/web`, and shared `packages/payments`, `packages/db`, `packages/provider`, `packages/observability`. Use Docker Compose for local API, worker, web and PostgreSQL services, and run builds and tests in containers too. The Node version is pinned to the current LTS in `.nvmrc` and the Dockerfile, so the host's Node version does not matter. One root `Dockerfile` builds the workspace once: its `app` target (compiled packages and the API's and worker's production dependencies) runs the API, the worker and a one-shot `init` job (migrations, development merchants and payments), and its `web` target is nginx serving the built dashboard with `/api` proxied to the API. `docker compose up --build` starts all of it.
+| Area | Choice | Rationale | Tradeoff |
+|---|---|---|---|
+| Language and runtime | TypeScript (strict), Node.js 24 LTS, npm workspaces | One language and type system across API, worker, dashboard and shared packages | Single-threaded runtime; CPU-heavy work would need workers |
+| API framework | NestJS 11 | Modules, guards, pipes and DI give a consistent structure for auth and validation | More setup than Express |
+| Persistence | PostgreSQL 18, `pg`, hand-written SQL, versioned migrations | Transactions, row locks, constraints and partial indexes carry the correctness guarantees; explicit SQL keeps lock and transaction boundaries visible | No ORM conveniences; queries are written and reviewed by hand |
+| Job queue | `jobs` table, `SELECT … FOR UPDATE SKIP LOCKED`, leases with generations | No extra infrastructure; jobs commit atomically with the business rows that create them | Claiming, retries and lease expiry are implemented in-house; throughput bounded by the database |
+| Authentication | HS256 JWT plus a server-side session row | Explicit expiry and immediate revocation on logout | One session lookup per request; not stateless |
+| Provider | In-process fake with test tokens and fault injection | Reproducible success, decline, timeout and lost-response paths, including in tests | No real provider integration |
+| Dashboard | React 19, MUI 9, React Router, Vite; framework-free controllers bound with `useSyncExternalStore` | Component library for tables and forms; business behaviour testable without a DOM | ~500 kB bundle (MUI) |
+| Observability | Pino, Prometheus client (`@prometheus-io/client`), W3C Trace Context | Structured logs, standard metrics exposition, vendor-neutral trace propagation | No tracing backend deployed |
+| Packaging | One multi-stage `Dockerfile` (targets `app`, `web`), Docker Compose | One build for all Node services; one command starts the stack | Compose is a local runtime, not a production orchestrator |
 
-### Project structure
+### 2.3 Repository layout
 
 ```text
-payment-processing/
-├── Software_Engineer-Technical_Exercise-Payment_Processing_Platform.md
-├── design_doc.md
-├── project_spec.md              # Technical contracts: flows, API, schema, metrics
-├── README.md
-├── package.json                 # Workspace scripts and package definitions
-├── package-lock.json
-├── .nvmrc                       # Pinned Node LTS version
-├── tsconfig.json                # Project references for `tsc -b`
-├── eslint.config.mjs            # Strict, type-aware lint rules
-├── jest.config.js               # Unit and integration test runner
-├── .prettierrc
-├── .prettierignore
-├── tsconfig.base.json
-├── Dockerfile                   # One build; targets `app` (API, worker, init) and `web` (nginx)
-├── .dockerignore                # Allowlist: only the workspace sources reach the build
-├── compose.yaml                 # PostgreSQL, init job, API, worker and web
-├── .env.example
-├── .gitignore
+.
 ├── apps/
-│   ├── api/
-│   │   ├── package.json
-│   │   └── src/
-│   │       ├── main.ts
-│   │       ├── app.ts           # Builds the Nest app (shared by main.ts and tests)
-│   │       ├── app.module.ts
-│   │       ├── tokens.ts        # Dependency-injection tokens
-│   │       ├── config/          # Environment validation (spec §8)
-│   │       ├── auth/            # Login, token issue, JWT/session checks, logout, CSRF, throttling
-│   │       ├── payments/        # HTTP routes, request validation, OpenAPI, payment wiring
-│   │       ├── seed/            # Development payments, created through the payment services
-│   │       ├── cli/             # seed:payments entry point
-│   │       ├── health/          # Liveness, readiness and metrics routes
-│   │       └── common/          # Request IDs and consistent HTTP errors
-│   ├── worker/
-│   │   ├── package.json
-│   │   └── src/
-│   │       ├── main.ts          # Wiring, signals and shutdown
-│   │       ├── config.ts        # Environment validation (spec §8)
-│   │       ├── worker.ts        # Poll loop: claims free slots, runs jobs in their log/trace context
-│   │       ├── heartbeat.ts     # Last poll-loop pass, for /health and a gauge
-│   │       ├── handlers/        # Settlement and operation recovery
-│   │       └── health.ts        # Worker health, readiness and metrics
-│   └── web/
-│       ├── package.json
-│       ├── index.html
-│       ├── vite.config.ts
-│       ├── nginx.conf          # The dashboard's server in Compose: static files, /api proxied
-│       └── src/
-│           ├── main.tsx
-│           ├── App.tsx
-│           ├── pages/          # Login, payment list, create and details
-│           ├── components/     # Forms, table, filters, status and history display
-│           └── lib/            # API client, session state, pending actions
+│   ├── api/          # NestJS API: auth, payment routes, OpenAPI, health; development payment seed
+│   ├── worker/       # Job runner: claim loop, recovery and settlement handlers, health server
+│   └── web/          # React dashboard; nginx.conf for the container
 ├── packages/
-│   ├── payments/src/           # State rules, reservation and finalization
-│   ├── db/
-│   │   ├── src/                # Pool, transactions and SQL repositories
-│   │   ├── migrations/         # Application and fake-provider schemas
-│   │   └── seeds/              # Two development merchants (their payments: apps/api/src/seed)
-│   ├── config/src/             # Environment reading shared by the API and the worker
-│   ├── provider/src/           # Provider contract and durable fake adapter
-│   └── observability/src/      # JSON logger, metrics and trace context
-└── tests/
-    ├── integration/            # API, PostgreSQL, provider and worker tests
-    └── helpers/                # Isolated test database and scenario setup
+│   ├── payments/     # Lifecycle rules, reservation, finalization, recovery, settlement, metrics
+│   ├── db/           # Pool, transactions, SQL repositories, migrations, merchant seed
+│   ├── provider/     # Provider contract and the durable fake
+│   ├── observability/# Logger and redaction, request context, metrics registry, trace context
+│   └── config/       # Environment parsing shared by API and worker
+├── tests/
+│   ├── integration/  # API, database, provider and worker tests against PostgreSQL
+│   └── helpers/      # Test database, scratch databases, fixtures
+├── Dockerfile        # Targets: app (API, worker, init) and web (nginx)
+├── compose.yaml      # db, test-db, init, api, worker, web, dev tools
+├── design_doc.md     # This document
+├── project_spec.md   # Contracts: flows, API, schema, metrics, configuration
+└── README.md         # Setup, usage, operations, test results
 ```
 
-Each shared package has its own `package.json` and TypeScript configuration; these are omitted from the tree for readability. Use npm workspaces and one root lockfile. Keep unit tests beside the state rules and utilities they test; keep cross-component tests in `tests/integration`.
+Unit tests sit next to the code they test; tests spanning components are in `tests/integration`.
 
-The API and worker both call `packages/payments` for reservations, claims and finalization. HTTP handlers and worker handlers do not implement separate lifecycle rules. SQL lives in `packages/db`; provider calls go through `packages/provider`. The web app calls the API and never imports database or provider implementation code.
+### 2.4 Deployment
 
-## 3. Payment lifecycle, money and payment methods
+```mermaid
+flowchart TB
+    subgraph compose [Docker Compose]
+        db[(db<br/>PostgreSQL 18)]
+        init[init<br/>migrate + seed, exits]
+        api[api :3000]
+        worker[worker :3001]
+        web[web :5173<br/>nginx]
+        testdb[(test-db<br/>tests only)]
+    end
+    db -->|healthy| init
+    init -->|completed successfully| api
+    init -->|completed successfully| worker
+    api -->|healthy| web
+```
+
+The `app` image (compiled packages plus the API's and worker's production dependencies, run as a non-root user) runs `init`, `api` and `worker` with different commands. The `web` image is nginx serving the built SPA: `/api/` is proxied to the API with the prefix stripped, other paths fall back to `index.html`. Health checks call `/ready`. The worker's stop grace period exceeds its drain timeout.
+
+## 3. Payment lifecycle
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Pending
-    Pending --> Authorized: Authorization confirmed
-    Pending --> Failed: Authorization rejected or not received
-    Authorized --> Captured: Capture confirmed
-    Captured --> Settled: Funds availability confirmed
-    Settled --> Refunded: Full refund confirmed
+    [*] --> Pending: create accepted
+    Pending --> Authorized: authorization confirmed
+    Pending --> Failed: declined or not received
+    Authorized --> Captured: capture confirmed
+    Captured --> Settled: funds availability confirmed
+    Settled --> Refunded: refund confirmed
     Failed --> [*]
     Refunded --> [*]
 ```
 
-- USD only. Store integer cents; accept amounts from 1 to 100,000,000 cents as an exercise-specific limit. Validate integer arithmetic and trim reference to 1–100 characters.
-- Full capture from Authorized; full refund from Settled. Other actions return 409 `INVALID_STATE_TRANSITION`.
-- A rejected capture preserves Authorized; a rejected refund preserves Settled. Finish the rejected operation without creating a payment-state transition.
-- A timeout preserves payment state and leaves the operation unresolved. Elapsed time alone never makes a payment Failed.
-- If the provider reliably has no record of an authorization, the payment becomes Failed with reason `authorization_not_received`. It is never re-authorized later. Capture and refund may be re-sent with the same provider key, because the provider deduplicates them.
-- Failed and Refunded are terminal. The fake provider does not expire authorization holds.
-- Settlement means provider-confirmed funds availability, not a bank payout. Simulate availability ten seconds after capture; the worker must still confirm it.
+- **Amounts:** USD, integer cents, 1 to 100,000,000. References are trimmed, 1–100 characters.
+- **Allowed actions:** capture from Authorized, refund from Settled, full amount only. Any other action returns 409 `INVALID_STATE_TRANSITION`.
+- **Rejections:** a rejected capture keeps Authorized; a rejected refund keeps Settled. The operation is finalized as rejected without a state transition.
+- **Timeouts** never change payment state. Elapsed time alone never fails a payment.
+- **Not received:** if the provider confirms it never received an authorization, the payment becomes Failed (`authorization_not_received`) and is never re-authorized. A capture or refund the provider never received is re-sent with the same provider key, which the provider deduplicates.
+- **Settlement** means provider-confirmed funds availability (simulated ten seconds after capture), not a bank payout. The worker confirms it.
+- **State vs. operation:** payment state is a confirmed outcome. Operation status (`reserved`, `awaiting_confirmation`, `needs_review`, `succeeded`, `rejected`) describes an action in progress.
 
-Payment state describes a confirmed outcome. Operation status describes an action: `reserved`, `awaiting_confirmation`, `needs_review`, `succeeded` or `rejected`.
+### 3.1 Payment methods and PCI scope
 
-### Payment methods and card data
+The platform never receives card numbers or CVVs; tokenization belongs to the provider. `POST /payments` accepts a provider token in `paymentMethod`. Request validation rejects unknown properties, so a field such as `cardNumber` is refused without being stored, echoed or logged. Only the token, brand and last four digits are stored; responses expose brand and last four; logs never contain the token.
 
-The platform never receives card numbers or CVVs. Customer checkout and tokenization belong to the provider and are out of scope. `POST /payments` takes a `paymentMethod` field holding a provider test token:
-
-| Token | Fake provider behavior |
+| Token | Provider behavior |
 |---|---|
-| `pm_card_visa` | Every call succeeds. |
-| `pm_card_declined` | Authorization is declined; the payment is created in state Failed. |
-| `pm_timeout` | The authorization never reaches the provider and the call times out. The API returns 202; recovery finds no record and marks the payment Failed (`authorization_not_received`). |
-| `pm_lost_response` | The first call of each operation (authorize, capture, refund) takes effect, but its response is lost. The API returns 202; recovery confirms the outcome without a duplicate effect. |
+| `pm_card_visa` | Every call succeeds |
+| `pm_card_declined` | Authorization declined; payment created as Failed |
+| `pm_timeout` | Authorization never reaches the provider; API returns 202; recovery fails the payment (`authorization_not_received`) |
+| `pm_lost_response` | The first call of each operation takes effect but its response is lost; API returns 202; recovery confirms the outcome without a second effect |
 
-Unknown tokens return 400. Request validation rejects unknown properties, so a field such as `cardNumber` is refused without being stored, echoed or logged. Store only the token, brand and last4; responses show brand and last4, and logs never include the token. Capture or refund rejections and timeouts before effect are injected in integration tests through the fake adapter's test interface, which is not reachable over HTTP.
+## 4. API and authentication
 
-## 4. Authentication and API
+### 4.1 Authentication
 
-Hash passwords with Argon2id. A successful login issues an eight-hour signed JWT containing merchant ID, session ID and expiry. On every request, verify the configured signature algorithm, signature, issuer/audience and expiry, then check that the referenced server-side session is active and belongs to that merchant. Logout revokes the session.
+Passwords are hashed with Argon2id. Login issues an HS256 JWT (merchant ID, session ID, issuer, audience, expiry; eight hours) backed by a `sessions` row. Every request verifies algorithm, signature, issuer, audience and expiry, then confirms the session is active and belongs to the token's merchant. Logout revokes the session, so a revoked token fails immediately.
 
-**Browsers.** `POST /auth/login` sets the JWT in an HttpOnly, SameSite=Lax cookie. Local development uses HTTP with `Secure=false`; production requires HTTPS and `Secure=true`. A same-origin Vite proxy keeps browser requests simple: the dashboard calls the API under `/api` (prefix stripped by the proxy), so page paths such as `/payments/:id` remain dashboard routes when reloaded. Because the session cookie is HttpOnly, the dashboard learns who is signed in (and gets a fresh CSRF token) from `GET /auth/session` on every page load. Require a session-bound CSRF token on cookie-authenticated mutations, validate browser origins and protect login from cross-origin submission. A request that sends neither `Origin` nor `Referer` (typical of non-browser clients) is deliberately accepted by the origin check; on the cookie path it still needs the CSRF token.
+| Client | Credential | CSRF protection |
+|---|---|---|
+| Browser | `POST /auth/login` sets the JWT in an HttpOnly, SameSite=Lax cookie (`Secure` in production) | Mutations require `X-CSRF-Token`, an HMAC of the session ID; `Origin`/`Referer`, when sent, must be in `ALLOWED_ORIGINS`; login itself is origin-checked |
+| API client | `POST /auth/token` returns the JWT in the body; sent as `Authorization: Bearer` | Not required: browsers never attach this header, and no cross-origin access is enabled. When `Authorization` is present it is the only credential considered |
 
-**API clients.** `POST /auth/token` takes the same credentials, returns the JWT in the response body and sets no cookie. Clients send `Authorization: Bearer <JWT>`. Bearer requests get identical verification and skip the CSRF check: browsers do not attach this header automatically, and the API enables no cross-origin access. When an `Authorization` header is present it is the only credential considered, so the CSRF exemption never applies to a cookie-authenticated request.
+The dashboard calls the API on its own origin under `/api` (nginx in Compose, the Vite proxy in development), which keeps the cookie first-party and lets page routes such as `/payments/:id` survive a reload. Because the cookie is HttpOnly, the dashboard learns the session and a fresh CSRF token from `GET /auth/session` on page load.
 
-Throttle failed attempts on both login endpoints in a PostgreSQL `login_attempts` table, keyed by normalized email and by client IP, so limits hold across API instances. The window length and both limits are configuration (`LOGIN_THROTTLE_WINDOW_SECONDS`, `LOGIN_THROTTLE_MAX_PER_EMAIL`, `LOGIN_THROTTLE_MAX_PER_IP`), defaulting to a fixed 15-minute window with 5 failures per email and 50 per IP. Each attempt is counted with one atomic increment before the password check, and refused if that pushes either count over its limit; a successful login clears the email's count and takes its own attempt back from the IP. Counting first means a burst of parallel guesses cannot all pass a read-then-record check before any failure is stored. Increments, resets and old-window cleanup each run in a short transaction that first takes a per-email, then a per-IP advisory lock, so they never lock rows in opposite orders and cannot deadlock. Tests use a short window so throttle tests cannot lock out the seeded merchants used by other tests. Return 429 with `Retry-After` and use generic credential errors.
+**Login throttling.** Failed attempts are counted in PostgreSQL per normalized email and per client IP, so limits hold across API instances (defaults: 15-minute window, 5 per email, 50 per IP; configurable). Each attempt is counted atomically before the password check, so parallel guesses cannot all pass a read-then-write check; a successful login clears the email's count. Advisory locks taken in a fixed order (email, then IP) prevent deadlocks. Exceeding a limit returns 429 with `Retry-After`; credential errors are generic.
 
-Every payment, operation and audit query uses merchant identity from the verified session. Another merchant's resource returns 404. Seed two development merchants for isolation tests. Their development payments are not SQL seeds: a script creates them through the same payment services as the API, with fixed idempotency keys, so each has real provider, operation and audit records and a re-run replays instead of duplicating.
+**Tenant isolation.** Every query is scoped by the merchant from the verified session. Another merchant's resource returns 404, indistinguishable from a missing one.
+
+### 4.2 Endpoints
 
 | Endpoint | Behavior |
 |---|---|
-| `POST /auth/login` | Validate credentials; set session cookie; return merchant, expiry and CSRF token |
-| `POST /auth/token` | Validate credentials; return `{ accessToken, expiresAt }`; no cookie |
-| `GET /auth/session` | Return merchant, expiry and a valid CSRF token after a page reload; no-store response |
-| `POST /auth/logout` | Revoke session; clear cookie; 204 |
-| `POST /payments` | `{ amount, reference, paymentMethod }` and `Idempotency-Key`; 201 for confirmed authorization or decline, 202 if unresolved |
-| `GET /payments/{id}` | Payment, operation history (including rejected and paused actions), review flags and transition history |
-| `GET /payments?status=&q=&cursor=&limit=` | Merchant-scoped status filter, reference substring search and cursor pagination |
-| `POST /payments/{id}/capture` | Idempotency key; 200 success, 422 confirmed rejection, 202 unresolved |
-| `POST /payments/{id}/refund` | Same response rules; allowed only from Settled |
+| `POST /auth/login` | Verify credentials; set session cookie; return merchant, expiry and CSRF token |
+| `POST /auth/token` | Verify credentials; return `{ accessToken, tokenType, expiresAt }`; no cookie |
+| `GET /auth/session` | Current merchant, expiry and CSRF token |
+| `POST /auth/logout` | Revoke the session; clear the cookie; 204 |
+| `POST /payments` | `{ amount, reference, paymentMethod }` plus `Idempotency-Key`; 201 when authorized or declined, 202 when unresolved |
+| `GET /payments/{id}` | Payment, unresolved operation, operation history and transition history |
+| `GET /payments?status=&q=&limit=&cursor=` | Status filter, reference substring search, keyset pagination (default 25, max 100) |
+| `POST /payments/{id}/capture` | `Idempotency-Key`; 200 confirmed, 422 rejected by provider, 202 unresolved |
+| `POST /payments/{id}/refund` | Same rules; allowed only from Settled |
 
-**Why create and capture/refund differ on rejection.** Create returns 201 whenever the provider gives a definitive answer, including a decline: a payment resource now exists, in state Failed, with the decline reason. Capture and refund act on an existing payment, so a provider rejection returns 422 `PROVIDER_REJECTED` and the payment keeps its state. Replays return the original status.
+Create returns 201 for a decline because a payment resource now exists, in state Failed. Capture and refund act on an existing payment, so a provider rejection returns 422 and the payment keeps its state. Lists return `{ items, nextCursor }` ordered by `(created_at DESC, id DESC)`; cursors are HMAC-signed and bound to the merchant and filters. The API serves a hand-written OpenAPI 3.1 document at `/openapi.json`; tests fail if a route is undocumented, documented but missing, or a response does not match its schema.
 
-List responses use `{ items, nextCursor }`, ordered by `(created_at DESC, id DESC)`. Default limit 25, maximum 100; validate cursors and bind them to merchant/filter values. Use UTC timestamps and include currency in money responses. Keep OpenAPI aligned with the code: the API serves a hand-written OpenAPI 3.1 document at `GET /openapi.json`, and tests fail if a route is undocumented (or documented but missing) or if a response does not match its schema.
+### 4.3 Error model
 
-Errors use `{ "error": { "code": "...", "message": "...", "requestId": "..." } }`, with an optional `details` object for field errors and provider rejections:
+Errors use one envelope, `{ "error": { "code", "message", "requestId", "details?" } }`. Messages never include submitted values.
 
 | HTTP | Code | When |
 |---|---|---|
-| 400 | `VALIDATION_ERROR` | Invalid body, query, cursor, idempotency key or payment-method token |
-| 413 / 415 | `VALIDATION_ERROR` | Body too large, or an unsupported charset or `Content-Encoding` |
-| 401 | `INVALID_CREDENTIALS` | Login or token request failed (generic message) |
+| 400 | `VALIDATION_ERROR` | Invalid body, query, cursor, idempotency key or token |
+| 413 / 415 | `VALIDATION_ERROR` | Body too large; unsupported charset or `Content-Encoding` |
+| 401 | `INVALID_CREDENTIALS` | Login failed (generic message) |
 | 401 | `UNAUTHENTICATED` | Missing, invalid, expired or revoked token |
-| 403 | `CSRF_REJECTED` | Cookie-authenticated mutation without a valid CSRF token, or with an Origin/Referer that is not allowed |
-| 404 | `NOT_FOUND` | Resource does not exist or belongs to another merchant |
-| 409 | `INVALID_STATE_TRANSITION` | Action not allowed from the payment's current state |
-| 409 | `OPERATION_IN_PROGRESS` | Another mutation on this payment is unresolved, including one paused for review |
-| 409 | `IDEMPOTENCY_CONFLICT` | Same idempotency key reused with different input |
-| 422 | `PROVIDER_REJECTED` | Provider rejected a capture or refund; payment state unchanged |
-| 429 | `RATE_LIMITED` | Login throttle exceeded; includes `Retry-After` |
-| 500 | `INTERNAL_ERROR` | Unexpected failure; no internal details exposed |
-| 503 | `SERVICE_UNAVAILABLE` | Work cannot be durably accepted, for example the database is unreachable |
+| 403 | `CSRF_REJECTED` | Cookie mutation without a valid CSRF token, or a disallowed Origin/Referer |
+| 404 | `NOT_FOUND` | Missing, or owned by another merchant |
+| 409 | `INVALID_STATE_TRANSITION` | Action not allowed from the current state |
+| 409 | `OPERATION_IN_PROGRESS` | Another mutation on the payment is unresolved, including one paused for review |
+| 409 | `IDEMPOTENCY_CONFLICT` | Same key reused with different input |
+| 422 | `PROVIDER_REJECTED` | Provider rejected a capture or refund; state unchanged |
+| 429 | `RATE_LIMITED` | Login throttle exceeded; `Retry-After` set |
+| 500 | `INTERNAL_ERROR` | Unexpected failure; no internals exposed |
+| 503 | `SERVICE_UNAVAILABLE` | The database cannot durably accept the work |
 
-An unresolved response includes payment ID/state, operation ID/status, reason and `Location: /payments/{id}`. A paused operation still returns 202 on replay, with `needs_review` clearly indicating that automatic processing stopped.
+## 5. Data model and idempotency
 
-## 5. Data and idempotency
+### 5.1 Entities
 
-| Table | Purpose |
+```mermaid
+erDiagram
+    MERCHANTS ||--o{ SESSIONS : "signs in with"
+    MERCHANTS ||--o{ PAYMENTS : owns
+    PAYMENTS ||--o{ OPERATIONS : "acted on by"
+    PAYMENTS ||--o{ JOBS : "processed by"
+    OPERATIONS ||--o| JOBS : "recovered by"
+    PAYMENTS ||--o{ AUDIT_EVENTS : "history of"
+
+    PAYMENTS {
+        uuid id PK
+        uuid merchant_id FK
+        int amount_cents
+        text state
+        text failure_reason
+        int version "compare-and-set"
+        bool settlement_review
+    }
+    OPERATIONS {
+        uuid id PK
+        text action
+        text idempotency_key "unique per merchant and scope"
+        text request_hash
+        text provider_key UK
+        int expected_version
+        text status
+        jsonb response_body "saved for replay"
+    }
+    JOBS {
+        uuid id PK
+        text type
+        text work_key UK
+        text status
+        bigint lease_generation
+        timestamptz review_deadline
+    }
+    AUDIT_EVENTS {
+        uuid id PK
+        text from_state
+        text to_state
+        text actor
+        text source
+        text request_id
+    }
+```
+
+`login_attempts` (throttle counters) and the provider's `provider.charges` and `provider.requests` tables complete the schema; full DDL is in spec §5.
+
+Operations and jobs carry the initiating request ID and `traceparent`. A settlement job inherits both from the capture that scheduled it, so a payment's history can be followed from the API request to settlement.
+
+### 5.2 Idempotency
+
+Create, capture and refund require an `Idempotency-Key` (1–128 printable ASCII characters). Keys are unique per `(merchant, scope, key)`, where the scope is `create` or the action plus payment ID. The request is hashed after validation and normalization, so property order does not matter.
+
+| Request | Response |
 |---|---|
-| `merchants` | Identity and password hash |
-| `sessions` | Merchant binding, client kind, expiry and revocation; the CSRF token is an HMAC of the session ID, so it is session-bound without being stored |
-| `login_attempts` | Failed-attempt counters per email and per client IP, by time window |
-| `payments` | Merchant, amount/currency, reference, payment-method token/brand/last4, state, failure reason, version, provider ID and timestamps |
-| `operations` | Payment/action, client key, normalized request hash, provider key, expected payment version, status, reason, saved response and initiating request ID/trace context |
-| `jobs` | Unique work identity, type, status, due time, retry count, lease owner/expiry/generation, review deadline, last error, request ID and trace context |
-| `audit_events` | Payment, prior/new state, timestamp, actor, reason, operation and request IDs; unique transition identity |
+| Same key, same input, operation finished | The saved status and body (replay) |
+| Same key, same input, operation unresolved | 202 with current state |
+| Same key, different input | 409 `IDEMPOTENCY_CONFLICT` |
 
-Jobs carry the request ID and trace context of the request that created them. A settlement job inherits both from the capture that scheduled it, so one payment's journey can be followed from API request to settlement.
+Validation, authorization and state errors are not stored, because no operation was reserved; retrying them with the same key is safe. Idempotency records are retained for the life of this system.
 
-`payments.version` is used only for the compare-and-set check on finalize. Reservation saves the payment's current version on the operation (`expected_version`); finalization updates the payment `WHERE id = $1 AND version = $expected_version` and increments the version. Zero updated rows means the payment changed in a way the operation did not expect, so the transaction rolls back and re-reads. It is not exposed to clients.
+### 5.3 Concurrency control
 
-Provider records live in a separate schema. Index payment list queries by merchant/time and merchant/state/time, add a `pg_trgm` GIN index on `payments.reference` for `ILIKE '%q%'` substring search, index jobs by status/due time, and audit by payment/time.
-
-Require keys of 1–128 printable ASCII characters, excluding spaces, for create/capture/refund; UUIDs qualify. Uniqueness is `(merchant_id, action_scope, key)`, where scope is create or target payment plus action. Hash normalized, validated input so JSON property order is irrelevant.
-
-- Same key/input: return the saved final status/body, or 202 while unresolved.
-- Same key/different input: 409 `IDEMPOTENCY_CONFLICT`.
-- Check merchant access and replay before rejecting an action based on current payment state. For capture and refund, these checks run inside the reservation transaction while holding the payment row lock (`SELECT ... FOR UPDATE`), so two concurrent requests cannot both see Authorized and both call the provider.
-- Enforce one unresolved mutation per payment with a partial unique constraint covering reserved, awaiting confirmation and review statuses. A second mutation returns 409 `OPERATION_IN_PROGRESS`; paused work still blocks it.
-- Retain idempotency records for the exercise. Saved responses describe the completed action; GET details returns current payment state.
-
-## 6. Safe execution and recovery
-
-1. In one short transaction, reserve the operation, its unique recovery job and the payment/creation audit when applicable. For capture and refund, lock the payment row first and recheck idempotency, unresolved operations and state under that lock. The API inserts the job already leased to itself, so the worker can take it over after lease expiry like any other claimed job. Commit before contacting the provider.
-2. Call the provider with the saved provider key. The fake provider atomically deduplicates concurrent calls and durably stores the effect independently of the application transaction.
-3. On a definitive result, lock payment, operation and job in that order, recheck job ownership, and update the payment's state and failure reason together with its compare-and-set version. Commit confirmed state, operation result, saved response, audit, job completion and any follow-up settlement job together. A rejected capture or refund finalizes the operation and job without updating the payment or writing an audit row.
-4. On timeout, leave the operation awaiting confirmation, record the reason and schedule recovery. If the process crashes, the persisted job becomes available after lease expiry.
-5. Recovery first looks up the saved provider key. Confirmed success or rejection finalizes locally. If the provider reliably has no record: for create, mark the payment Failed (`authorization_not_received`) and finalize the operation as rejected; for capture or refund, re-send with the same key. A lookup that could miss an existing effect is uncertain.
-
-In the fake provider, lookup and mark-not-received are one atomic step. Authorize and lookup both write a single provider row keyed by the provider key. Lookup runs `INSERT ... (status 'not_received') ON CONFLICT (provider_key) DO NOTHING` and then reads the row. Authorize runs its own `INSERT ... ON CONFLICT DO NOTHING` and, if it finds a `not_received` row, returns rejected. The unique key serializes the two, so exactly one wins. A late-arriving original call therefore cannot authorize a payment already marked Failed. A real provider needs an equivalent guarantee (§11).
-
-API and worker claim due jobs with `SELECT ... FOR UPDATE SKIP LOCKED` in a short transaction that sets the lease owner, a 30-second expiry and an increasing generation. A worker claims only as many jobs as it has free processing slots, one by default, so no claimed job waits locally while its lease runs down. The owner renews the lease before each provider call, and the lease must outlast a lookup plus a re-send. Every result or reschedule checks the current generation. An expired owner's late response cannot overwrite newer work. Provider deduplication still protects an overlapping call after lease takeover.
-
-Every transaction that locks more than one of these rows acquires them in the order payment → operation → job, skipping rows it does not need. This applies to reservation, finalization, timeout rescheduling, pausing, settlement and resumption; job claims and lease renewals lock only the job. Never hold locks across provider calls. Settlement rechecks Captured state and unresolved mutations before committing Settled. Audit writes are atomic and deduplicated.
-
-This covers crashes before reservation, before provider execution, after provider effect but before local commit, and after local commit but before the HTTP response. A durable job exists for every accepted mutation; unique work identities prevent duplicate job creation.
-
-## 7. Worker and failure policy
-
-One worker polls due jobs every five seconds for settlement and operation recovery. `SKIP LOCKED` claims mean additional worker instances cannot simultaneously own the same job. Process only due, unpaused work; expired running claims are recoverable.
-
-| Setting | Decision |
+| Mechanism | Guarantee |
 |---|---|
-| Provider timeout | Five seconds per call |
-| Settlement availability in fake | Ten seconds after capture |
-| Ordinary status check | Every five seconds |
-| Worker concurrency | One job at a time; claim only free slots |
-| Transient failures | One initial attempt plus up to three retries |
-| Retry delay | Increasing delay with jitter, based on 2, 4 and 8 seconds |
-| Reconciliation limit | Thirty minutes from initial acceptance; then pause for review |
-| Heartbeat | Every ten seconds; stale after thirty seconds |
-| Shutdown | Stop claiming; allow fifteen seconds to drain; recover unfinished work by lease expiry |
+| Payment row lock (`SELECT … FOR UPDATE`) during capture/refund reservation, with idempotency, unresolved-operation and state checks under the lock | Two concurrent captures cannot both see Authorized and both call the provider |
+| Partial unique index: one unresolved operation per payment | A second mutation returns 409 `OPERATION_IN_PROGRESS` |
+| Unique `(merchant, scope, key)` index | Concurrent same-key creates produce one payment |
+| `payments.version` compare-and-set at finalization | A finalization cannot apply to a payment that changed unexpectedly |
+| Lock order payment → operation → job in every multi-row transaction | No lock-order deadlocks |
+| No lock held across a provider call | A slow provider cannot block other transactions |
 
-A recovery attempt is one claim of the job: the lookup plus any re-send the lookup requires. A technical failure anywhere in the attempt (timeout or provider unavailable) consumes one unit of the retry budget, even if the lookup inside it succeeded. The consecutive-failure count resets only when a whole attempt reaches a definitive outcome or an ordinary waiting outcome, such as the provider reporting work still in progress or settlement not yet available. Waiting outcomes use ordinary polling, bounded by the review deadline. So "not received, re-send, timeout" repeated over and over still stops after three retries.
+## 6. Mutation execution and recovery
 
-Exhaustion or the review deadline pauses the job and records a reason. Uncertain mutation operations become `needs_review`; payment state remains unchanged. Paused settlement leaves Captured and exposes a settlement-review flag. Polling excludes paused jobs.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as Client
+    participant A as API
+    participant DB as PostgreSQL
+    participant P as Provider
+    participant W as Worker
+    C->>A: POST /payments/{id}/capture (Idempotency-Key)
+    A->>DB: TX1: lock payment, check key/state, insert operation + leased job, COMMIT
+    A->>P: capture(providerKey)
+    alt definitive answer
+        P-->>A: succeeded / rejected
+        A->>DB: TX2: lock payment → operation → job, check generation + version, write state, audit, saved response
+        A-->>C: 200 / 422
+    else timeout or provider unavailable
+        P--xA: no answer
+        A->>DB: operation awaiting_confirmation, job queued
+        A-->>C: 202 (unresolved)
+        W->>DB: claim job (SKIP LOCKED, generation + 1)
+        W->>P: lookup(providerKey); re-send if not received
+        W->>DB: finalize as TX2, or retry with backoff, or pause (needs_review)
+    end
+```
 
-`needs_review` is our dead-letter state: work that automatic processing has given up on, kept in place with its reason and history until an operator resolves it. Paused settlement jobs, shown by the settlement-review flag, belong to the same state. There is no separate dead-letter queue.
+1. **Reserve (TX1).** One short transaction writes the operation, its recovery job (already leased to the API), and for a create the payment and its first audit row. It commits before the provider is contacted.
+2. **Call the provider** with the operation's provider key, holding no locks. The provider deduplicates by key and stores effects in its own transactions.
+3. **Finalize (TX2)** on a definitive answer: lock payment, operation and job in order, verify the job's lease generation and the payment's version, then commit state, failure reason, operation result, saved response, audit row, job completion and (after a capture) the settlement job together.
+4. **On timeout or unavailability**, mark the operation `awaiting_confirmation` and queue its job for the worker.
+5. **Recover.** The worker looks up the provider key. A confirmed outcome is finalized. "Not received" fails a create (`authorization_not_received`) or re-sends a capture or refund with the same key.
 
-Document database inspection and a guarded resumption procedure: verify provider outcome, lock the paused job, record operator/reason, preserve provider identity and history, reset its retry budget and set a new review deadline. Concurrent resumption accepts one update. Completed or invalidated work cannot be resumed. An operator CLI or replay screen is outside this slice.
+In the provider, lookup and authorize both write one row per provider key with `INSERT … ON CONFLICT DO NOTHING`, so a lookup that records "not received" and a late-arriving authorization cannot both succeed. A real provider must offer an equivalent guarantee (§14).
 
-## 8. Dashboard and observability
+### 6.1 Failure modes
 
-Provide login/logout, payment table, status/reference filters, pagination, creation with a test-token selector, and a details page showing the payment, its state-transition history and its operation history, so rejected and paused actions are visible. Enable capture only when Authorized and refund only when Settled, with no unresolved mutation. Include loading, empty, error and expired-session states; the backend enforces the same rules. Status, search and page size live in the page address, so a reload or a shared link keeps them. Changing any of them starts again at the newest page; older and newer pages keep the current rows on screen while the next page loads, and new filters show placeholders instead of the previous filters' rows. Because the address then carries what a merchant typed, an explicit sign-out sends the next sign-in to the plain list, and after an expired session sign-in returns to the same page only when the same merchant signs back in.
+| Failure | Result | Mechanism | Automated test |
+|---|---|---|---|
+| Process dies after the provider applied the effect, before TX2 | Recovered exactly once | Job lease expires; worker looks up the key and finalizes | Yes |
+| Lease owner stalls; another worker takes the job; the first returns late | First owner's result discarded | Generation check on every write | Yes |
+| Provider times out with no effect (`pm_timeout`) | Create fails as not received; late original call rejected | Atomic lookup-and-mark | Yes |
+| Provider times out after the effect (`pm_lost_response`) | Outcome confirmed by recovery, no second effect | Lookup by provider key | Yes |
+| Two concurrent captures with different keys | One provider call; the other gets 409 | Row lock and partial unique index | Yes |
+| Process dies before TX1 commits | Nothing persisted; client retries | Transaction atomicity | By design |
+| Process dies after TX1, before the provider call | Recovery finds "not received": create fails, capture/refund re-sent | Leased job plus lookup | By design |
+| Process dies after TX2, before the HTTP response | Client retry replays the saved response | Idempotency record | By design |
+| Provider repeatedly unavailable | Retried with backoff, then paused for review | Retry budget (§7) | Yes |
+| Database unavailable | 503; readiness fails | Error mapping; `/ready` | Yes |
 
-Generate one idempotency key per new action. Preserve pending action/key/input in merchant-scoped sessionStorage for page-reload and lost-response recovery. Retry with that key; never silently generate another key for an uncertain action. The record is saved before the first request and cleared only on a definite answer: a 200 or 201, a 400, 404 or 409 (nothing was reserved under the key), or a 422 (the provider's stored refusal). A 202, a network failure, a 401, 403 or 5xx keep it; after a 202 the action is sent once more with its key when the details show no unresolved operation, collecting the stored outcome. If the browser refuses to store the record, the action is not sent. A late answer updates the record only if the same key is still stored, so it cannot bring back a record cleared at sign-out or overwrite a newer one, and it never acts on a page that has been left. A create with an unknown outcome can only be sent again with its key; a new one can start once it has an answer. Capture and refund ask for confirmation. Load session/CSRF state before restoring pending work and clear browser records on explicit logout. The page-load session check treats only a 401 as signed out; a network or server failure shows that the server can't be reached, with a button to check again, so a valid session is never mistaken for a sign-out. Poll open unresolved details every five seconds (pending, captured and awaiting settlement, or with an unresolved operation, including one paused for review), pause polling while the page is hidden, and stop once only the merchant can move the payment; show review status when processing pauses. A payment that does not exist or belongs to another merchant shows as not found, matching the API's 404.
+## 7. Background processing
 
-| Area | Instrumentation |
+The worker runs two kinds of jobs. Both are rows in the `jobs` table, created in the same transaction as the business change that needs them, so no accepted work can be lost between a commit and an enqueue.
+
+| Job type | Created when | Each attempt | Finishes when |
+|---|---|---|---|
+| `operation_recovery` | Every create, capture and refund, at reservation, already leased to the API. The worker gets it when the API's provider call times out (queued) or the API stops (claimable once the lease expires) | Look up the provider key; re-send a capture or refund the provider never received | The operation is finalized (succeeded or rejected) |
+| `settlement` | A capture is confirmed; due after the poll interval | Ask the provider whether the captured funds are available | The payment is Settled, or no longer Captured |
+
+### 7.1 Claiming and leases
+
+```mermaid
+flowchart LR
+    poll[Poll every 5 s] --> claim[Claim due jobs<br/>FOR UPDATE SKIP LOCKED<br/>lease 30 s, generation + 1]
+    claim --> check[Re-check job identity]
+    check --> renew[Renew lease]
+    renew --> call[Call provider<br/>no locks held]
+    call --> write[Write result in one transaction<br/>if generation unchanged]
+    write --> poll
+```
+
+- **Claim:** due jobs (queued and due, or running with an expired lease) are selected with `FOR UPDATE SKIP LOCKED`, so concurrent workers never wait on, or take, the same job. A claim sets the lease owner and a 30-second expiry and increments the lease generation.
+- **Capacity:** a worker claims only as many jobs as it has free slots (`WORKER_CONCURRENCY`, default 1), so a claimed job never waits locally while its lease runs out.
+- **Lease:** renewed before every provider call. It must outlast one full attempt (lookup plus re-send), which configuration validation enforces.
+- **Ownership:** every write compares the lease generation first. If another worker took the job over after the lease expired, the late result is discarded and counted as `lease_lost`.
+- **Identity:** before acting, the job is re-read and must still name the same payment and operation; otherwise it raises `WorkMismatchError` and writes nothing.
+
+### 7.2 Outcomes and retries
+
+| Attempt outcome | Job | Retry budget | Metric result |
+|---|---|---|---|
+| Definitive provider answer, or "not received" for a create | Completed; operation finalized | — | `completed` |
+| Ordinary wait (settlement not yet available) | Rescheduled after 5 s | Reset to 0 | `rescheduled` |
+| Technical failure (timeout, provider unavailable) | Rescheduled after backoff | +1 | `retried` |
+| Budget exhausted, or review deadline passed | Paused | — | `paused` |
+| Lease taken over by another worker | Result discarded | — | `lease_lost` |
+| Payment changed unexpectedly | Nothing written; reclaimed after the lease expires, paused at the review deadline if it persists | — | `version_conflict` |
+| Unexpected error | Nothing written; reclaimed after the lease expires | — | `failed` |
+
+| Policy | Value |
 |---|---|
-| Logs | Pino JSON with service, event, request/operation/job IDs, attempt and reason. Info for transitions, debug for routine polls/duplicates, warn for retries/review, error for exhausted work. |
-| Correlation | Validate or generate request IDs, return them and persist them into operation and job context; settlement jobs inherit the capture's. Worker runs also have their own IDs. |
-| API metrics | Request rate, errors and latency by method, route template and status class. |
-| Payment metrics | Created/captured/refunded/failed transition counters and current-state counts. Durable audit is authoritative if an after-commit process counter misses an event. |
-| Worker/provider metrics | Due queue depth, lag, retries, failures, paused backlog, heartbeat, provider timeouts and oldest unresolved age. A 202 response must not hide provider trouble. |
-| Health | API `/health` for liveness and `/ready` for database/migration readiness. Worker heartbeat and its own readiness indicate background availability. |
-| Audit | Who/what changed the payment, when, previous/new state and reason. Failed attempts belong in operation records, job records and logs, and appear in the details page's operation history. |
-| Tracing | Preserve trace context across API, provider and jobs; document OpenTelemetry adoption. Verify propagation; a full tracing deployment is optional. |
+| Provider timeout | 5 s per call |
+| Retry budget | 1 attempt plus up to 3 retries |
+| Backoff | 2, 4, 8 s, ±20% jitter |
+| Review deadline | 30 min from job creation |
+| Settlement availability (fake) | 10 s after capture |
+| Heartbeat | Every 10 s; `/health` stale after 30 s |
+| Shutdown | Stop claiming; drain in-flight jobs for up to 15 s; anything unfinished is reclaimed after its lease expires |
 
-Expose `/metrics` on API and worker. Keep labels bounded; no payment/merchant IDs or references. When scaling, emit global database gauges from one collector and distinguish per-process counters.
+A recovery attempt is one claim: the lookup plus any re-send it requires. A technical failure anywhere in it consumes one unit of budget, so a pattern of "not received, re-send, timeout" still stops after three retries.
 
-Do not accept real PAN/CVV or log raw bodies, passwords, cookies, tokens, payment-method tokens or secrets. Test redaction, including nested fields and serialized errors. Keep credentials out of source; provide `.env.example`. Operational examples should show request-to-worker correlation and inspection of delayed or paused work.
+### 7.3 Dead letter
 
-## 9. Testing strategy
+When the retry budget or the review deadline is exhausted, the job is paused with a reason (`retries_exhausted` or `review_deadline_reached`):
 
-**Unit tests** cover pure rules with small input spaces: the state-transition table, request-hash normalization, cursor encoding and validation, retry-delay calculation and log redaction. They are fast and can be exhaustive.
+- a create, capture or refund operation becomes **`needs_review`**, and the payment keeps its state;
+- a settlement leaves the payment Captured with `settlement_review` set.
 
-**Integration tests** (Jest and Supertest) run against real PostgreSQL and the durable fake provider. Correctness here depends on constraints, row locks, `SKIP LOCKED`, compare-and-set updates and transaction boundaries, which mocks would hide.
+`needs_review` is the dead-letter state. Paused work stays with its full history, keeps blocking other mutations on the payment, is shown in the dashboard and is counted by `jobs_paused`. The README gives the query that lists it. Resolving it is a manual operator decision; there is no resume tooling yet (§15).
 
-Automated tests use a separate, disposable PostgreSQL container started with `fsync`, `synchronous_commit` and `full_page_writes` off. This trades crash durability, which a throwaway test database does not need, for faster runs; locking, constraints and transaction semantics are unchanged. The development database keeps safe defaults, and production would never use these settings.
+## 8. Dashboard
 
-Integration scenarios:
+| Route | Purpose |
+|---|---|
+| `/sign-in` | Sign-in form and lifecycle explainer |
+| `/` | Payment list: status filter, reference search, page size, older/newer pages |
+| `/payments/new` | Create a payment with a test card |
+| `/payments/:id` | Details: lifecycle with timestamps, history, operations, capture/refund |
 
-- Each test token end to end, including `authorization_not_received` and a late original call rejected after it.
-- Same-key replay, idempotency conflict, competing mutations (`OPERATION_IN_PROGRESS`) and invalid transitions.
-- Capture/refund rejection returning 422 with state preserved; failed refunds.
-- Timeout before effect and effect followed by a lost response; provider and application restarts.
-- Stale-owner results after lease takeover; duplicate finalization and audit. Assertions count one audit row per transition: a successful create has two rows (creation to Pending, then Pending to Authorized), and recovery adds the authorization row exactly once.
-- Retry exhaustion and review deadline; paused operations blocking new actions.
-- Auth expiry, revocation, CSRF on the cookie path, Bearer access without CSRF, login throttling, and two-merchant isolation (404).
-- Pagination and cursor binding; trigram reference search; readiness failure.
-- Redaction and request-to-worker correlation in captured logs.
+Stateful behaviour lives in framework-free controllers (session, list, details, actions), tested with Vitest and bound to React with `useSyncExternalStore`.
 
-Two recovery scenarios are core and must pass: a provider effect that succeeds while the application dies before saving the result, followed by exactly one recovery; and a lease takeover where the old owner returns late without overwriting the new owner's result. The README will report which scenarios were run and their actual results.
+- **Session.** The page-load check treats only a 401 as signed out; a network or server failure shows "can't reach the payment server" with a retry, so a valid session is never mistaken for a sign-out. Each adopted session has a generation; late responses can end only the session they started under. Sign-out clears the merchant's browser records.
+- **List.** Status, search and page size are in the URL. Any filter change resets cursor history; older/newer navigation keeps the current rows while loading; a new filter shows placeholders. Only the latest request updates the view.
+- **Return after sign-in.** After an explicit sign-out the next sign-in starts at the list; after an expired session, sign-in returns to the previous page only for the same merchant.
+- **Details.** Polled every 5 seconds while something can change without the merchant (pending, captured, or an unresolved operation); paused while the tab is hidden; stopped once the payment is settled, refunded, failed or authorized with nothing in flight. A missing or foreign payment shows "not found".
+- **Actions.** Capture is offered only when Authorized and refund only when Settled, with nothing in flight, behind a confirmation. Each action gets a new idempotency key, saved in merchant-scoped `sessionStorage` before the request; if it cannot be saved, the request is not sent. The record is cleared only on a definite answer (200, 201, 400, 404, 409, 422). After a 202 the action is re-sent once with the same key when the payment has no unresolved operation, collecting the stored outcome; after a network or server error it is re-sent only on the merchant's retry, always with the same key. A late answer never recreates a cleared record, overwrites a newer one, or updates a page that was left.
 
-## 10. Assumptions
+## 9. Observability
 
-- Payments are USD only, stored as integer cents from 1 to 100,000,000.
-- Captures and refunds are for the full amount. Partial captures, partial refunds and cancellation are not supported.
-- **Refunds are allowed only after settlement.** Real providers usually allow a refund once a payment is captured, sometimes as a reversal before settlement. Limiting refunds to Settled keeps one refund path and one state diagram for this exercise.
-- Settlement means provider-confirmed funds availability, simulated ten seconds after capture. It is not a bank payout or a settlement batch.
-- The platform receives only provider test tokens, never card data; customer checkout is out of scope.
-- An authorization the provider never received fails the payment rather than being retried later, because re-authorizing long after the customer's request is a business decision this exercise does not make.
-- Each merchant account has one user and no staff roles. Merchant references are not required to be unique; idempotency keys prevent duplicate creation.
-- Authorization holds do not expire in the fake provider.
-- The exercise runs locally over HTTP.
-- Eight-hour sessions without refresh, the default login-throttle window and limits, five-second polling, three retries and the thirty-minute review threshold are exercise choices, not requirements imposed by the brief.
+### 9.1 Logging
 
-## 11. Production boundary
+Pino writes JSON lines with `service`, `event`, `requestId`, `traceId` and, when known, payment, operation and job IDs. Levels: `info` for state transitions, `warn` for retries, timeouts and rejected requests, `error` for paused work, `debug` for routine polling. Redaction removes passwords, tokens, cookies, secrets and payment-method tokens by key at any depth, including inside serialized errors; request and response bodies are never logged. Event names are listed in spec §7.1.
 
-Before production: enable HTTPS/Secure cookies, managed secrets and restricted operational access; validate a real provider's idempotency, lookup, authorization expiry and refund semantics, including a guarantee that a "not received" authorization cannot later succeed (or a reversal path if it does); test backup/restore, migrations and failure recovery; define retention and operational runbooks; configure alerts from observed behavior; and load-test queries, claims, connection pools and worker concurrency.
+### 9.2 Metrics
 
-Keep unresolved recovery data until resolved. Add replicas, a queue library or an external broker only when deployment or measured capacity needs justify them. Real payment collection, callbacks, disputes and broader accounting rules require separate design and integration tests.
+Both services expose Prometheus text at `/metrics`.
 
-## 12. Future improvements
+| Signal | Metrics |
+|---|---|
+| RED | `http_requests_total`, `http_request_duration_seconds` (method, route template, status class) |
+| Business | `payment_transitions_total` (from/to state), `payments_by_state` |
+| Provider | `provider_requests_total` (operation, outcome), `provider_request_duration_seconds` |
+| Queue | `jobs_due` (depth), `jobs_lag_seconds`, `job_runs_total` (result), `jobs_paused` (dead-letter backlog), `operations_unresolved_oldest_age_seconds` |
+| Liveness | `worker_heartbeat_timestamp_seconds` |
 
-- A real provider adapter (for example Stripe) behind the existing provider contract.
-- Refunds from Captured, partial captures and refunds, authorization cancellation and multiple currencies.
-- Outbound webhooks to merchants as a second background workflow.
-- Merchant API keys for server-to-server access instead of password login for API clients.
-- An operator CLI or screen for inspecting and resuming paused work.
-- Staff roles and per-user audit actors within a merchant.
-- A deployed OpenTelemetry collector and tracing backend, with dashboards and alerts.
-- Any crash-point or resumption coverage beyond the two core recovery scenarios that is not completed in this slice, as listed in the README.
-- Bounded worker concurrency above one job at a time, once measured load needs it.
+Labels are bounded: no payment IDs, merchant IDs or references. Database-wide gauges are computed by a single collector in the worker, so scaling the API does not double-count them. Process counters are per instance; the audit table remains authoritative.
+
+### 9.3 Tracing
+
+The API accepts or starts a W3C `traceparent` per request and stores it on the operation and job. The worker continues the stored trace (same trace ID, new span ID, the stored span recorded as `followsFromSpanId`). Trace and span IDs are in every log line. No exporter or tracing backend is deployed; adopting OpenTelemetry means adding its SDK and a collector, with the existing context as the parent.
+
+### 9.4 Health and readiness
+
+| Endpoint | Meaning |
+|---|---|
+| API `/health` | Process is serving |
+| API `/ready` | Database reachable and all migrations applied (bounded time) |
+| Worker `/health` | Poll-loop heartbeat within 30 s |
+| Worker `/ready` | Database and migrations OK, and not shutting down |
+
+### 9.5 Audit trail
+
+`audit_events` stores one row per payment transition: from and to state, actor (`merchant:<id>` or `system:settlement`), source (`api` or `worker`), reason, operation and request IDs, and timestamp. A unique constraint on `(payment, to_state)` makes each transition recorded exactly once. Failed and rejected attempts are recorded on operations and jobs, and shown in the dashboard's operation history.
+
+## 10. Security
+
+| Area | Control |
+|---|---|
+| Credentials | Argon2id hashes; generic login errors; DB-backed throttling per email and IP |
+| Sessions | HS256 JWT with fixed algorithm, issuer and audience; server-side session check; revocation on logout; 8-hour expiry |
+| Browser | HttpOnly SameSite=Lax cookie; session-bound HMAC CSRF token; Origin/Referer allowlist; no CORS |
+| Authorization | Merchant derived only from the session; cross-merchant access returns 404 |
+| Input | Schema validation with unknown properties rejected; parameterized SQL only; body size and encoding limits |
+| Card data | Never accepted (tokens only); brand and last four stored |
+| Secrets and logs | Secrets from environment variables, validated at startup; redaction in logs; `Cache-Control: no-store` on auth and payment responses |
+| Containers | API, worker and init run as the non-root `node` user; nginx sends `nosniff` and `same-origin` referrer headers |
+
+Local limits: HTTP only (`COOKIE_SECURE=false`; the API refuses `NODE_ENV=production` without secure cookies). Behind nginx all browser clients share nginx's address for the per-IP throttle; trusting forwarded addresses (`TRUST_PROXY`) is safe only behind a known proxy.
+
+## 11. Scalability and performance
+
+- **API** instances are interchangeable: session state is in PostgreSQL, throttle counters are shared, and no request depends on local memory.
+- **Workers** scale horizontally: `SKIP LOCKED` claims and leased generations prevent double processing; per-instance concurrency is configurable.
+- **Queries:** keyset pagination avoids offset scans; a `pg_trgm` GIN index serves reference substring search; list, job and audit queries have matching composite or partial indexes.
+- **Provider latency** never holds a database lock, so slow calls do not block other payments.
+- **Bottleneck:** PostgreSQL carries data, queue and audit. Next steps under measured load: connection pooling (PgBouncer), retention for completed jobs and idempotency records, read replicas for listing, and a dedicated broker if job throughput outgrows polling.
+
+## 12. Testing strategy
+
+| Type | Scope |
+|---|---|
+| Unit | State machine, request hashing, cursor signing, retry delays, log redaction, configuration validation |
+| Integration (real PostgreSQL) | API and worker flows against a disposable database; isolated scratch databases where needed |
+| Contract | API responses in tests validated against the OpenAPI document (Ajv); every route documented and every documented route implemented |
+| Concurrency | Parallel captures produce one provider call; parallel claims never share a job; concurrent same-key creates produce one payment |
+| Fault injection | Provider timeout before and after effect, lost response, unavailability |
+| Crash recovery | Effect applied but not saved, recovered once; stale lease owner rejected |
+| Frontend | Vitest on session, list, details and pending-action controllers |
+| Regression | A test for each defect found in review |
+| Mutation (manual) | Each guard disabled to confirm a test fails |
+| Smoke | Fresh clone, `docker compose up --build`, healthy services |
+| Manual end-to-end | Browser walkthroughs of every dashboard flow |
+
+Integration tests use a separate PostgreSQL container with `fsync`, `synchronous_commit` and `full_page_writes` off, kept in memory: faster runs, no crash durability, identical locking and transaction semantics. The development database keeps safe defaults. Current results are in the README.
+
+Not covered by automation: browser end-to-end tests, component rendering tests, load tests, coverage reporting, and the crash points marked "by design" in §6.1.
+
+## 13. Assumptions
+
+Where the brief is open, these choices were made. Each is configurable or isolated, so it can change without redesign.
+
+**Business**
+
+- USD only, stored as integer cents; amounts from $0.01 to $1,000,000.00.
+- Captures and refunds are for the full amount. No partial amounts, cancellation or voids.
+- Refunds are allowed only after settlement, which keeps a single refund path. Real providers usually allow refunding a captured payment, sometimes as a reversal before settlement.
+- Settlement means provider-confirmed availability of funds, not a bank payout or a settlement batch.
+- An authorization the provider never received fails the payment. It is not retried later, because charging a customer long after their request is a business decision outside this scope.
+- One user per merchant account; no staff roles. Merchant references need not be unique; idempotency keys prevent duplicate creation.
+- Authorization holds do not expire.
+
+**Provider**
+
+- Card data never reaches the platform; checkout and tokenization are the provider's.
+- The provider deduplicates requests by an idempotency key, can report the outcome of a key on request, and guarantees that a request it reported as "not received" cannot succeed later. The fake provider implements exactly these guarantees; a real one must be verified against them (§14).
+- Funds become available ten seconds after capture (simulated).
+
+**Technical**
+
+- One PostgreSQL primary is the system of record, the job queue and the audit log. Leases and deadlines use the database clock.
+- Sessions last eight hours without refresh.
+- The system runs locally over HTTP; the seeded merchants and payments are development data.
+- Throttle limits, polling interval, retry budget and review deadline are configuration defaults, not brief requirements.
+
+## 14. Production readiness
+
+The system is complete for local evaluation. Running it in production needs the following; none requires a change of design.
+
+| Area | Today | Required for production |
+|---|---|---|
+| Transport and secrets | HTTP; development secrets in `.env` | TLS at the load balancer; `COOKIE_SECURE=true`; secrets from a secrets manager with rotation |
+| Network exposure | All endpoints on one port | `/metrics`, `/health`, `/ready` and `/openapi.json` reachable only internally; `TRUST_PROXY` set for the real load balancer so per-IP throttling sees client addresses |
+| Provider | Deterministic fake | Real adapter behind the existing interface; its idempotency, lookup, authorization-expiry and refund semantics verified against the §13 provider assumptions, or a reversal path where they do not hold |
+| Database | Single local container | Managed PostgreSQL with high availability, point-in-time recovery and tested restores; PgBouncer; migrations run as a gated release step rather than at container start |
+| Data lifecycle | Everything retained | Retention for completed jobs, expired sessions, login attempts and idempotency records; audit records retained per policy |
+| Deployment | Docker Compose | An orchestrator (for example Kubernetes or ECS) with health-gated rollouts, several API and worker replicas, resource limits |
+| Observability | Logs to stdout; metrics endpoints; trace IDs in logs | Log shipping and search; Prometheus scraping and dashboards; an OpenTelemetry collector and tracing backend |
+| Alerting | None | Alerts on `jobs_paused` above zero, `jobs_lag_seconds`, provider timeout and error rates, 5xx rate, stale worker heartbeat, oldest unresolved operation |
+| Operations | Paused work listed by SQL | Runbooks; a guarded resume tool for paused work; on-call ownership |
+| Delivery and supply chain | Checks run by hand | CI on every change (`npm run check`, both test suites, image build); dependency and image vulnerability scanning |
+| Capacity | Not load-tested | Load tests of list queries, job claims, connection pools and worker concurrency, with targets from expected traffic |
+
+## 15. Future improvements
+
+Ordered by value for the next iteration.
+
+| Priority | Improvement | Why |
+|---|---|---|
+| Next | CI pipeline running checks, tests and the image build on every change | Every change verified automatically |
+| Next | Guarded resume for paused work (verify the provider outcome, lock in order, record the operator and reason, reset the budget), with an operator CLI or screen | Dead-lettered work can be resolved without hand-written SQL |
+| Next | Automated browser end-to-end tests (Playwright) for create → capture → settle → refund and the lost-response reload | The main user journeys are protected by automation, not only manual walkthroughs |
+| Next | Crash-point tests for the failure modes marked "by design" in §6.1 | Every recovery path has an automated proof |
+| Later | Real provider adapter (for example Stripe) behind the provider interface | Moves from a simulation to a real integration |
+| Later | OpenTelemetry SDK, collector and tracing backend | Traces become visible end to end |
+| Later | Refunds from Captured, partial captures and refunds, voids, multiple currencies | Covers common merchant needs |
+| Later | Outbound webhooks to merchants | A second asynchronous workflow, using the same job table |
+| Later | Merchant API keys; staff roles with per-user audit actors | Server-to-server access and accountability within a merchant |
+| Later | Component tests, load tests, coverage reporting | Broader automated quality signals |
+| Later | Route-level code splitting in the dashboard | Smaller initial download |

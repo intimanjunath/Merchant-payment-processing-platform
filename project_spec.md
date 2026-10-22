@@ -1,8 +1,22 @@
 # Payment Processing Platform: Technical Specification
 
-This specification defines the contracts the code must match: components, data flows, API, database schema, observability and configuration. `design_doc.md` explains why these choices were made and what was traded away. If the two disagree, fix the disagreement in the same change.
+This specification defines the contracts the implementation must match: components, data flows, state machines, API, database schema, provider behaviour, observability, configuration, dashboard behaviour and deployment. `design_doc.md` records the decisions and tradeoffs behind them; `README.md` covers setup and operation. A change that makes the code and this document disagree updates both.
 
-Diagrams use capitalized state names (Pending, Authorized) for readability. On the wire and in the database, states and statuses are lowercase snake_case (`pending`, `needs_review`).
+**Status:** implemented. Transitions marked *reserved* are allowed by the schema but performed by no code path in this release.
+
+States and statuses are written as they are stored and sent: lowercase snake_case (`pending`, `needs_review`).
+
+| Term | Meaning |
+|---|---|
+| Payment | A merchant's charge; its state records confirmed outcomes only (§3.1) |
+| Operation | One requested action on a payment (authorize, capture, refund), its idempotency key, provider key and saved response (§3.2) |
+| Job | Background work with an owner and a lease: recovery of an operation, or settlement of a payment (§3.3) |
+| Idempotency key | Client-supplied key making a mutation safe to retry (§2.7) |
+| Provider key | Key the platform sends to the provider for one operation; the provider deduplicates by it (§6) |
+| Lease, generation | Time-limited job ownership; the generation increases on every claim, so a stale owner's write is detectable (§3.3) |
+| Unresolved | An operation whose outcome is not yet known: `reserved`, `awaiting_confirmation` or `needs_review` |
+| Dead letter | Work automatic processing has stopped on: a `paused` job and its `needs_review` operation (§3.4) |
+| TX1, TX2 | The reservation transaction before the provider call, and the finalization transaction after it (§2.2) |
 
 ## Contents
 
@@ -15,6 +29,8 @@ Diagrams use capitalized state names (Pending, Authorized) for readability. On t
 7. [Observability](#7-observability)
 8. [Configuration](#8-configuration)
 9. [Requirements traceability](#9-requirements-traceability)
+10. [Dashboard client](#10-dashboard-client)
+11. [Build and deployment](#11-build-and-deployment)
 
 ## 1. System architecture
 
@@ -61,6 +77,8 @@ flowchart TD
     WRK[apps/worker] --> PAY
     API --> OBS[packages/observability]
     WRK --> OBS
+    API --> CFG[packages/config]
+    WRK --> CFG
     PAY --> DBP[packages/db]
     PAY --> PRV[packages/provider]
     PAY --> OBS
@@ -71,10 +89,11 @@ flowchart TD
 
 | Package | Owns | Exposes |
 |---|---|---|
-| `packages/payments` | Transition table, idempotency rules, reservation, finalization, claim/lease rules, retry policy | `createPayment`, `capturePayment`, `refundPayment`, `recoverOperation`, `settlePayment`, `claimJobs` |
-| `packages/db` | Pool, transaction helper, migration runner, SQL repositories | Repository functions taking a transaction client |
-| `packages/provider` | Provider contract and the durable fake | `PaymentProvider` interface (§6) |
-| `packages/observability` | Logger, redaction, request context, metrics registry, trace context | `logger`, `withContext`, `metrics`, `traceparent` helpers |
+| `packages/payments` | Transition table, idempotency rules, reservation, finalization, recovery, settlement, claim/lease rules, retry policy, domain metrics | `createPayment`, `capturePayment`, `refundPayment`, `getPaymentDetails`, `listPaymentsPage`, `recoverOperation`, `settlePayment`, `claimJobs`, `renewJobLease` |
+| `packages/db` | Pool, transaction helper, migration and seed runners, readiness check, SQL repositories | `createPool`, `withTransaction`, `migrate`, `seed`, `checkReadiness`, repository functions taking a client |
+| `packages/provider` | Provider contract and the durable fake | `PaymentProvider` (§6), `createFakeProvider`, `TEST_TOKENS` |
+| `packages/observability` | Logger and redaction, request context, metrics registry, trace context | `createLogger`, `runWithContext`, `createMetricsRegistry`, `createHttpMetrics`, `createPaymentMetrics`, `resolveRequestId`, `parseTraceparent`, `startSpan` |
+| `packages/config` | Environment parsing that collects every problem before failing | `EnvReader`, `ConfigError` |
 
 Rules: lifecycle decisions live only in `packages/payments`. Controllers and worker handlers translate HTTP or job input into calls on it. SQL appears only in `packages/db`. No package imports from `apps/*`.
 
@@ -91,6 +110,17 @@ Rules: lifecycle decisions live only in `packages/payments`. Controllers and wor
 Host ports are defaults; `DB_HOST_PORT`, `TEST_DB_HOST_PORT`, `API_HOST_PORT`, `WORKER_HOST_PORT` and `WEB_HOST_PORT` override them when something else already uses them (a different web port also needs `ALLOWED_ORIGINS` to name it). Services always connect over the Compose network (`db:5432`, `test-db:5432`).
 
 ## 2. Data flows
+
+| Flow | Trigger | Shows |
+|---|---|---|
+| 2.1 | Sign-in and any authenticated request | Throttling, session creation, per-request verification |
+| 2.2 | Create with a definitive answer | Reservation (TX1), provider call, finalization (TX2) |
+| 2.3 | Create whose answer is lost | 202 response, worker recovery, client replay |
+| 2.4 | Create the provider never receives | Recovery marks the payment failed; late calls rejected |
+| 2.5 | Capture, then settlement | Row lock at reservation; settlement job polling |
+| 2.6 | Refund | Same as capture, no follow-up job |
+| 2.7 | Every mutation | Order of checks and the response each produces |
+| 2.8 | Every request and job | Request ID and trace propagation |
 
 ### 2.1 Login and per-request authentication
 
@@ -183,14 +213,18 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     autonumber
+    participant C as Client
     participant A as API
     participant DB as PostgreSQL
     participant P as Fake provider
     participant W as Worker
+    C->>A: POST /payments, Idempotency-Key K
+    A->>DB: TX1 reserve payment, operation, leased job, audit, COMMIT
     A->>P: authorize(providerKey)
     Note over P: Request never arrives, nothing stored
-    P--xA: Timeout
+    P--xA: Timeout after PROVIDER_TIMEOUT_MS
     A->>DB: Operation awaiting_confirmation, job queued
+    A-->>C: 202 {payment(pending), operation(awaiting_confirmation)}
     W->>DB: Claim job
     W->>P: lookup(authorize, providerKey)
     P->>P: INSERT requests(providerKey, not_received) ON CONFLICT DO NOTHING
@@ -273,68 +307,171 @@ Searching logs for one `requestId` shows the API request, the provider call, eve
 
 ## 3. State machines
 
+Three state machines govern the system. A **payment** records confirmed business outcomes. An **operation** records one requested action (authorize, capture or refund) and whether its outcome is known. A **job** records background work and who currently owns it. Payment state changes only when an operation or a settlement is confirmed; operations and jobs change many times on the way.
+
 ### 3.1 Payment state
 
-| From | Action / event | To | Actor |
-|---|---|---|---|
-| — | Create accepted | `pending` | `merchant:<id>` |
-| `pending` | Authorization confirmed | `authorized` | `merchant:<id>` |
-| `pending` | Authorization declined or not received | `failed` | `merchant:<id>` |
-| `authorized` | Capture confirmed | `captured` | `merchant:<id>` |
-| `captured` | Funds availability confirmed | `settled` | `system:settlement` |
-| `settled` | Refund confirmed | `refunded` | `merchant:<id>` |
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> pending: create accepted
+    pending --> authorized: authorization confirmed
+    pending --> failed: declined / not received
+    authorized --> captured: capture confirmed
+    captured --> settled: funds available
+    settled --> refunded: refund confirmed
+    failed --> [*]
+    refunded --> [*]
+```
 
-Every other (state, action) pair returns `INVALID_STATE_TRANSITION`. The audit `source` column records whether the API or the worker committed the transition; `actor` records who initiated it.
+| From | Event | To | Actor (audit `actor`) | Committed by (audit `source`) |
+|---|---|---|---|---|
+| — | Create accepted | `pending` | `merchant:<id>` | API |
+| `pending` | Authorization confirmed | `authorized` | `merchant:<id>` | API, or worker after recovery |
+| `pending` | Authorization declined or not received | `failed` | `merchant:<id>` | API, or worker after recovery |
+| `authorized` | Capture confirmed | `captured` | `merchant:<id>` | API, or worker after recovery |
+| `captured` | Funds availability confirmed | `settled` | `system:settlement` | Worker |
+| `settled` | Refund confirmed | `refunded` | `merchant:<id>` | API, or worker after recovery |
+
+`failed` and `refunded` are terminal. Every other (state, action) pair returns 409 `INVALID_STATE_TRANSITION`. A provider rejection of a capture or refund changes no state (§2.6). Each transition writes exactly one audit row; the unique `(payment_id, to_state)` constraint enforces it.
 
 ### 3.2 Operation status
 
+| Status | Meaning | Outcome known | Blocks other mutations |
+|---|---|---|---|
+| `reserved` | Committed in TX1; provider call in flight or not yet made | No | Yes |
+| `awaiting_confirmation` | The last provider call timed out or failed; recovery is scheduled | No | Yes |
+| `needs_review` | Automatic recovery stopped (dead letter) | No | Yes |
+| `succeeded` | Provider confirmed the action; payment transitioned | Yes (terminal) | No |
+| `rejected` | Provider refused it, or a create was never received | Yes (terminal) | No |
+
 ```mermaid
 stateDiagram-v2
+    direction LR
     [*] --> reserved: TX1 commit
-    reserved --> succeeded: provider confirmed
-    reserved --> rejected: provider rejected
-    reserved --> awaiting_confirmation: timeout or crash recovery
-    awaiting_confirmation --> succeeded: lookup confirmed
-    awaiting_confirmation --> rejected: lookup rejected, or create not received
-    awaiting_confirmation --> needs_review: retries exhausted or review deadline
-    needs_review --> awaiting_confirmation: guarded resume
+    reserved --> succeeded: confirmed
+    reserved --> rejected: refused
+    reserved --> awaiting_confirmation: call failed
+    awaiting_confirmation --> succeeded: confirmed
+    awaiting_confirmation --> rejected: refused / not received
+    awaiting_confirmation --> awaiting_confirmation: attempt failed
+    awaiting_confirmation --> needs_review: budget or deadline
+    reserved --> needs_review: deadline
+    needs_review --> awaiting_confirmation: resume (reserved)
     succeeded --> [*]
     rejected --> [*]
+
+    classDef open fill:#fff4e5,stroke:#b26a00
+    classDef done fill:#e8f5ee,stroke:#1c6b57
+    class reserved,awaiting_confirmation,needs_review open
+    class succeeded,rejected done
 ```
 
-`reserved`, `awaiting_confirmation` and `needs_review` are unresolved and block other mutations on the payment. `needs_review` is the dead-letter state.
+| From | To | Trigger | Written by |
+|---|---|---|---|
+| — | `reserved` | Reservation transaction commits (§2.7 step 9) | API |
+| `reserved` | `succeeded` / `rejected` | Definitive provider answer, finalized in TX2 | API; worker if the API stopped first |
+| `reserved` | `awaiting_confirmation` | The API's provider call timed out or the provider was unavailable | API |
+| `reserved` | `needs_review` | The API stopped, and the review deadline had passed when the worker reclaimed the job | Worker |
+| `awaiting_confirmation` | `succeeded` / `rejected` | A recovery attempt got a definitive answer, or found a create never received | Worker |
+| `awaiting_confirmation` | `awaiting_confirmation` | A recovery attempt failed technically; the reason is updated | Worker |
+| `awaiting_confirmation` | `needs_review` | Retry budget exhausted or review deadline passed (§3.4) | Worker |
+| `needs_review` | `awaiting_confirmation` | Operator resume. *Reserved: no code performs it* | — |
+
+The `reason` column always explains the latest status: `provider_timeout`, `provider_unavailable`, `capture_rejected`, `refund_rejected`, `card_declined`, `authorization_not_received`, `retries_exhausted` or `review_deadline_reached`. A partial unique index allows at most one unresolved operation per payment.
 
 ### 3.3 Job status
 
+| Job type | `work_key` | Created | Purpose |
+|---|---|---|---|
+| `operation_recovery` | `recover:<operation_id>` | In TX1 with its operation, already `running` and leased to the API | Resolve the operation if the API cannot |
+| `settlement` | `settle:<payment_id>` | In TX2 of a successful capture, `queued` | Confirm funds availability |
+
+| Status | Meaning | Lease fields |
+|---|---|---|
+| `queued` | Waiting until `due_at` | Cleared |
+| `running` | Owned by one process until `lease_expires_at` | `lease_owner`, `lease_expires_at`, `lease_generation` set |
+| `paused` | Dead letter: stopped with `paused_reason` | Cleared |
+| `completed` | Work finished | Cleared |
+| `cancelled` | *Reserved: no code sets it* | Cleared |
+
 ```mermaid
 stateDiagram-v2
-    [*] --> running: API inserts job leased to itself
-    [*] --> queued: settlement job created at capture
-    queued --> running: claimed, generation + 1
-    running --> running: lease expired and reclaimed, generation + 1
-    running --> queued: retry or poll rescheduled
-    running --> completed: finalized
-    running --> paused: retries exhausted or review deadline
-    paused --> queued: guarded resume
-    queued --> cancelled: work invalidated
-    paused --> cancelled: work invalidated
+    direction LR
+    [*] --> running: recovery job (TX1)
+    [*] --> queued: settlement job (TX2)
+    queued --> running: claimed
+    running --> running: lease expired, reclaimed
+    running --> queued: rescheduled
+    running --> completed: finished
+    running --> paused: budget or deadline
+    paused --> queued: resume (reserved)
+    queued --> cancelled: (reserved)
+    paused --> cancelled: (reserved)
     completed --> [*]
     cancelled --> [*]
+
+    classDef active fill:#eef3fb,stroke:#3b5b73
+    classDef stopped fill:#fff4e5,stroke:#b26a00
+    classDef done fill:#e8f5ee,stroke:#1c6b57
+    class queued,running active
+    class paused stopped
+    class completed done
 ```
+
+| From | To | Trigger | Written by |
+|---|---|---|---|
+| — | `running` | Reservation inserts the recovery job leased to the API (`lease_generation = 1`) | API |
+| — | `queued` | Capture finalization inserts the settlement job, due after `WORKER_POLL_INTERVAL_MS` | API or worker |
+| `queued` | `running` | Claimed with `FOR UPDATE SKIP LOCKED`; generation + 1, `attempts` + 1 | Worker |
+| `running` | `running` | Lease expired and the job was claimed again; generation + 1 | Worker |
+| `running` | `queued` | API call timed out (no budget used); recovery attempt failed (backoff); settlement not yet available (poll interval) | API or worker |
+| `running` | `completed` | Operation finalized; settlement confirmed; or settlement no longer applicable | API or worker |
+| `running` | `paused` | Retry budget exhausted or review deadline passed | Worker |
+| `paused` | `queued` | Operator resume. *Reserved: no code performs it* | — |
+| `queued` / `paused` | `cancelled` | *Reserved: no code performs it* | — |
+
+Every write to a `running` job first checks that the caller still holds the current `lease_generation`. A process whose lease was taken over has its result discarded (`job.lease_lost`).
 
 ### 3.4 Recovery attempts and the retry budget
 
-A **recovery attempt** is one claim of a recovery job: the lookup plus any re-send that the lookup requires. The attempt, not each provider call inside it, decides the retry budget.
+A **recovery attempt** is one claim of an `operation_recovery` job: the steps below, from the deadline check to the final write. The attempt, not each provider call inside it, is what the retry budget counts.
 
-| Attempt ends with | `consecutive_failures` | Next step |
-|---|---|---|
-| Definitive outcome (confirmed success, rejection, or create not received) | — | Finalize; job completed |
-| Ordinary waiting outcome (provider reports the work still in progress; settlement not yet available) | Reset to 0 | Reschedule after the poll interval |
-| Technical failure in any call of the attempt (timeout, provider unavailable) | +1 | Retry after 2, 4, then 8 s with jitter; pause to `needs_review` when it would exceed `JOB_MAX_RETRIES` |
+```mermaid
+flowchart TD
+    start([Job claimed]) --> identity{Job, operation and<br/>payment still match?}
+    identity -->|no| mismatch[WorkMismatchError<br/>nothing written]
+    identity -->|yes| deadline{Review deadline<br/>passed?}
+    deadline -->|yes| pause[Pause<br/>review_deadline_reached]
+    deadline -->|no| lookup[Renew lease, lookup provider key]
+    lookup -->|succeeded / rejected| finalize[Finalize operation<br/>job completed]
+    lookup -->|not received, create| fail[Finalize: payment failed<br/>authorization_not_received]
+    lookup -->|not received, capture or refund| resend[Renew lease, re-send<br/>with the same key]
+    resend -->|succeeded / rejected| finalize
+    lookup -->|timeout / unavailable| failed{failures + 1<br/>> JOB_MAX_RETRIES?}
+    resend -->|timeout / unavailable| failed
+    failed -->|no| retry[Reschedule after backoff<br/>operation awaiting_confirmation]
+    failed -->|yes| exhausted[Pause<br/>retries_exhausted]
+```
 
-Details: the delay after the n-th consecutive failure is `JOB_RETRY_BASE_MS × 2^(n−1)`, within ±20% jitter. The review deadline is checked when an attempt starts; past it, the attempt pauses without calling the provider. The lease is renewed before the lookup and before any re-send, and a failed renewal ends the attempt without a call. Before the first write or provider call of an attempt, the stored job row is re-read: it must be an `operation_recovery` job naming the same operation and payment as the claimed record, and the operation must belong to that payment (and the payment to the operation's merchant). Every finalize, reschedule and pause transaction repeats the check under its locks before comparing the generation. A mismatch raises `WorkMismatchError` and changes nothing. A failed attempt marks the operation `awaiting_confirmation` with the failure as its reason; a pause marks it `needs_review` (`retries_exhausted` or `review_deadline_reached`) and the job `paused` with the same `paused_reason`. Every write checks the lease generation first.
+| Attempt ends with | `consecutive_failures` | Job | Operation |
+|---|---|---|---|
+| Definitive answer (confirmed, rejected, or a create not received) | Unchanged | `completed` | `succeeded` or `rejected` |
+| Technical failure in any call of the attempt | +1 | `queued`, due after the backoff | `awaiting_confirmation`, reason updated |
+| Technical failure that makes `consecutive_failures` exceed `JOB_MAX_RETRIES` | +1 | `paused` (`retries_exhausted`) | `needs_review` |
+| Review deadline passed at the start of the attempt | Unchanged | `paused` (`review_deadline_reached`) | `needs_review` |
+| Lease lost before a call or at the write | Unchanged | Owned by another process | Unchanged |
 
-Example: lookup succeeds with "not received", the capture is re-sent and times out. The attempt failed, so the count goes up by one even though the lookup itself succeeded. A later attempt that repeats the same pattern also counts as a failure, so at most three retries follow the initial attempt. The review deadline still pauses work that keeps waiting without failing.
+**Budget rules**
+
+- The API's own provider call is not counted: when it times out, the job is requeued with `consecutive_failures = 0`. The worker then has one attempt plus up to `JOB_MAX_RETRIES` (default 3) retries; the fourth consecutive failure pauses the job.
+- The delay after the n-th consecutive failure is `JOB_RETRY_BASE_MS × 2^(n−1)` with ±20% jitter: about 2, 4 and 8 s by default.
+- The review deadline (`REVIEW_DEADLINE_SECONDS` from reservation, default 30 min) is checked at the start of each attempt; past it, the job pauses without calling the provider.
+- Settlement attempts use the same budget and backoff for technical failures. Their ordinary wait ("funds not yet available") reschedules after `WORKER_POLL_INTERVAL_MS` and resets `consecutive_failures` to 0; the review deadline bounds the waiting (§5.5).
+
+**Safety checks.** Before the first call or write, the stored job is re-read: it must be an `operation_recovery` job naming the same operation and payment as the claimed row, the operation must belong to that payment, and the payment to the operation's merchant; otherwise `WorkMismatchError` is raised and nothing changes. The lease is renewed before the lookup and before any re-send; a failed renewal ends the attempt without a call. Every finalize, reschedule and pause transaction repeats the identity check under its locks and then compares the lease generation.
+
+**Example.** A capture times out in the API (job requeued, budget untouched). Worker attempt 1: lookup says "not received", the re-send times out: failures = 1, retry in about 2 s. Attempts 2 and 3 repeat the pattern: failures = 2 and 3, retries in about 4 and 8 s. Attempt 4 fails the same way: failures = 4 exceeds 3, so the job pauses and the operation becomes `needs_review`, even though every lookup inside those attempts succeeded.
 
 ## 4. API design
 
@@ -430,7 +567,7 @@ Origin check (cookie-authenticated mutations, `/auth/login`, `/auth/token`): the
 }
 ```
 
-`details` is optional. It carries field errors for 400 as `fields: [{ field, issue }]` (the issue names the rule, never the value sent; an unknown field such as `cardNumber` reads `is not an accepted field`, and a bad `Idempotency-Key` is reported as that field), `{ state }` for 409 `INVALID_STATE_TRANSITION`, and `{ paymentId, operationId, code }` for 422. Every error response sends `Cache-Control: no-store`. A database that cannot be reached (connection refused or dropped, pool connect timeout, SQLSTATE class 08 or 57P01–57P03) answers 503 `SERVICE_UNAVAILABLE`. Codes and statuses are listed in design doc §4.
+`details` is optional. It carries field errors for 400 as `fields: [{ field, issue }]` (the issue names the rule, never the value sent; an unknown field such as `cardNumber` reads `is not an accepted field`, and a bad `Idempotency-Key` is reported as that field), `{ state }` for 409 `INVALID_STATE_TRANSITION`, and `{ paymentId, operationId, code }` for 422. Every error response sends `Cache-Control: no-store`. A database that cannot be reached (connection refused or dropped, pool connect timeout, SQLSTATE class 08 or 57P01–57P03) answers 503 `SERVICE_UNAVAILABLE`. Codes and statuses are listed in design doc §4.3.
 
 ### 4.3 Authentication endpoints
 
@@ -771,7 +908,7 @@ CREATE TABLE provider.injected_faults (
 | Schedule recovery after a timeout or technical failure | Operation → job |
 | Pause to `needs_review` | Payment (only to set `settlement_review`) → operation → job |
 | Settlement finalize | Payment → job |
-| Guarded resume | Payment → operation → job |
+| Guarded resume (reserved, not implemented) | Payment → operation → job |
 | Claim | Job only, with `SKIP LOCKED`, so it never waits |
 | Lease renewal | Job only |
 
@@ -1014,21 +1151,139 @@ All settings come from environment variables, validated at startup; the process 
 | `WORKER_SHUTDOWN_GRACE_MS` | `15000` | Worker |
 | `LOG_LEVEL` | `info` | All |
 
+Compose-level variables (read by `compose.yaml` and the dashboard dev server, not by the services' configuration):
+
+| Variable | Default | Used by |
+|---|---|---|
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | — (required in `.env`) | `db` container |
+| `TEST_POSTGRES_USER` / `TEST_POSTGRES_PASSWORD` / `TEST_POSTGRES_DB` | — (required in `.env`) | `test-db` container |
+| `DB_HOST_PORT` / `TEST_DB_HOST_PORT` | `5432` / `5433` | Host port mapping |
+| `WEB_HOST_PORT` / `API_HOST_PORT` / `WORKER_HOST_PORT` | `5173` / `3000` / `3001` | Host port mapping; a different web port must also be in `ALLOWED_ORIGINS` |
+| `API_PROXY_TARGET` | `http://localhost:3000` | Vite dev server proxy for `/api` |
+
 ## 9. Requirements traceability
 
-| Brief requirement | Where it is met |
+| Brief requirement | Contract | Design |
+|---|---|---|
+| Login; token validation and expiry | §2.1, §4.3 | §4.1 |
+| Create, get, capture, refund, list/search | §2.2–2.7, §4.4 | §4.2 |
+| Lifecycle states | §3.1 | §3 |
+| Asynchronous workflow | §2.3–2.5, §3.2–3.4, §5.5 | §6, §7 |
+| Dashboard: login, list, filter/search, details | §10 | §8 |
+| Structured logs, correlation, levels, no sensitive data | §2.8, §7.1 | §9.1 |
+| RED, business and queue metrics | §7.2 | §9.2 |
+| Tracing | §2.8 | §9.3 |
+| Health/readiness | §4.5 | §9.4 |
+| Audit trail | §4.2 (Transition), §5.3 (`audit_events`) | §9.5 |
+| Consistent errors | §4.2 | §4.3 |
+| Idempotency | §2.7, §5.3 | §5.2 |
+| Retries, timeouts, dead-letter | §3.2–3.4, §6 | §7 |
+| Local setup | §8, §11 | §2.4; README |
+| Documentation deliverables | — | §2, §13–15; README |
+
+## 10. Dashboard client
+
+### 10.1 Routes
+
+| Path | Access | Content |
+|---|---|---|
+| `/sign-in` | Public | Sign-in form; notices for signed-out, expired-session and unreachable-server states |
+| `/` | Signed in | Payment list |
+| `/payments/new` | Signed in | Create form |
+| `/payments/:paymentId` | Signed in | Payment details and actions |
+| any other | — | Redirect to `/` |
+
+### 10.2 API usage
+
+The dashboard calls the API under `/api` on its own origin (§11.3). Every request sends `credentials: same-origin` and `Accept: application/json`; non-GET requests add `X-CSRF-Token` when a session exists; mutations add `Idempotency-Key`. Failures become one client error type carrying status, code, message, request ID, details and `Retry-After`; a request that gets no response maps to the client-only code `NETWORK_ERROR`; a non-JSON error page maps to `SERVICE_UNAVAILABLE` (5xx) or `INTERNAL_ERROR`.
+
+### 10.3 Session
+
+| State | Entered when | Shown |
+|---|---|---|
+| `loading` | Page load; retrying after `unavailable` | Spinner on protected routes |
+| `signed_in` | `GET /auth/session` or sign-in succeeds | Requested page |
+| `signed_out` (`none`, `signed_out`, `expired`) | 401 on the page-load check; explicit sign-out; expiry timer or a 401 on a request | Sign-in page with the matching notice |
+| `unavailable` | Page-load check fails with a network error or a non-401 error | "Can't reach the payment server" with **Check again**; on `/sign-in`, a warning above the form |
+
+Each adopted session has a generation number. A 401, an expiry timer or a sign-out response affects only the session that was current when it started. Sign-out removes every `pp:<merchantId>:` key from `sessionStorage` after the server confirms it.
+
+**Return after sign-in.** Navigating to a protected route while signed out passes `{ from, merchantId }` to the sign-in page: none after an explicit sign-out; the page and the previous merchant after expiry; the page and `null` on a first visit. After sign-in the dashboard returns to `from` only when it is a same-site path (starts with `/`, not `//`) and `merchantId` is `null` or equals the signed-in merchant; otherwise it opens `/`.
+
+### 10.4 Payment list
+
+| URL parameter | Rule | API mapping |
+|---|---|---|
+| `status` | One payment state; otherwise ignored | `status` |
+| `q` | Trimmed, at most 100 characters; empty means none; applied 300 ms after typing stops | `q` |
+| `limit` | `10`, `25` or `50`; otherwise 25 | `limit` |
+
+Cursors are kept in memory. A change to `status`, `q` or `limit` discards the cursor history and the page on screen and loads the newest page. Older/Newer keep the current page visible (dimmed) until the next one arrives. Only the most recent request may update the view; earlier requests are aborted. A failed load shows the error with a retry and no rows.
+
+### 10.5 Payment details
+
+Loads `GET /payments/{id}` and reloads every 5000 ms while the payment is unresolved: state `pending` or `captured`, or `pendingOperation` with status `reserved`, `awaiting_confirmation` or `needs_review`. Polling pauses while the document is hidden and resumes on visibility; it stops once the payment is resolved. A failed reload keeps the last details with a notice and keeps polling. A 404 shows "not found" and stops. Capture is offered when the state is `authorized`, refund when `settled`, in both cases only with no pending operation and no pending action (§10.6).
+
+### 10.6 Pending actions
+
+| Key in `sessionStorage` | Value |
 |---|---|
-| Login; token validation and expiry | Spec §2.1, §4.3; design §4 |
-| Create, get, capture, refund, list/search | Spec §4.4; design §4 |
-| Lifecycle states | Spec §3.1; design §3 |
-| Asynchronous workflow | Spec §2.3–2.5, §3.3; design §6–7 |
-| Dashboard | Design §8 |
-| Structured logs, correlation, levels, no sensitive data | Spec §2.8, §7.1; design §8 |
-| RED, business and queue metrics | Spec §7.2; design §8 |
-| Tracing | Spec §2.8; design §8 |
-| Health/readiness | Spec §4.5 |
-| Audit trail | Spec §5.3 (`audit_events`), §4.2 (Transition); design §8 |
-| Consistent errors | Spec §4.2; design §4 error table |
-| Idempotency | Spec §2.7, §5.3; design §5 |
-| Retries, timeouts, dead-letter | Spec §3.2–3.3, §6; design §7 |
-| Documentation deliverables | README; design §10–12 |
+| `pp:<merchantId>:pending:create` | `{ kind: 'create', key, input: { amount, reference, paymentMethod }, paymentId \| null, startedAt }` |
+| `pp:<merchantId>:pending:payment:<paymentId>` | `{ kind: 'capture' \| 'refund', key, paymentId, startedAt }` |
+
+`key` is a new random UUID per action. The record is written before the first request; if the write fails, the request is not sent. Records that fail validation are ignored.
+
+| Response | Record | Next |
+|---|---|---|
+| 200 or 201 | Cleared | Done |
+| 202 | Kept (a create also stores `paymentId`) | Sent once more with the same key when the details show no pending operation |
+| 400, 404, 409, 422 | Cleared | Error shown; nothing was reserved, or the provider's refusal is final |
+| 401, 403, 5xx, no response | Kept | Sent again with the same key only on the merchant's retry |
+
+A response updates or clears a record only if the stored record has the same key. A response that arrives after its page was left updates `sessionStorage` only. While a create is pending without an answer, the create page offers only to send it again with its key.
+
+## 11. Build and deployment
+
+### 11.1 Images
+
+| Dockerfile stage | Base | Contents |
+|---|---|---|
+| `manifests` | `node:24.22.1-bookworm-slim` | Root and workspace `package.json` files, lockfile |
+| `build` | `manifests` | `npm ci`, `tsc -b`, dashboard build |
+| `prod-deps` | `manifests` | `npm ci --omit=dev` for `@payments/api` and `@payments/worker` |
+| `app` (target) | `node:24.22.1-bookworm-slim` | Production dependencies, compiled packages, migrations and seeds; runs as `node` |
+| `web` (target) | `nginx:1.31.6-alpine` | Built dashboard and `apps/web/nginx.conf`; listens on 8080 |
+
+`.dockerignore` is an allowlist: root `package.json`, lockfile and TypeScript configuration, `apps/` and `packages/`, without `node_modules`, `dist` and build info.
+
+### 11.2 Compose services
+
+| Service | Image | Command | Starts after | Health check | Host port |
+|---|---|---|---|---|---|
+| `db` | `postgres:18.6-bookworm` | default | — | `pg_isready` | 5432 |
+| `test-db` | `postgres:18.6-bookworm` (`fsync`, `synchronous_commit`, `full_page_writes` off; tmpfs) | default | — | `pg_isready` | 5433 |
+| `init` | `app` | migrate, merchant seed, payment seed; exits | `db` healthy | — | — |
+| `api` | `app` | `node apps/api/dist/main.js` | `init` completed successfully | `GET /ready` | 3000 |
+| `worker` | `app` | `node apps/worker/dist/main.js`; stop grace 20 s | `init` completed successfully | `GET /ready` | 3001 |
+| `web` | `web` | nginx | `api` healthy | — | 5173 → 8080 |
+| `dev` (profile `tools`) | `node:24.22.1-bookworm-slim`, source mounted | per invocation | `db`, `test-db` healthy | — | — |
+
+### 11.3 Web server
+
+| Path | Handling |
+|---|---|
+| `/api/*` | Proxied to `http://api:3000/` with the `/api` prefix removed; `Host`, `X-Forwarded-For` and `X-Forwarded-Proto` set; 30 s read timeout |
+| `/assets/*` | Static, `Cache-Control: public, max-age=31536000, immutable` |
+| anything else | The file if it exists, otherwise `/index.html`; `Cache-Control: no-cache` |
+
+All responses send `X-Content-Type-Options: nosniff`; pages and API responses also send `Referrer-Policy: same-origin`. The Vite dev server applies the same `/api` rewrite.
+
+### 11.4 Development data
+
+| Command | Effect |
+|---|---|
+| `npm run db:migrate` | Applies pending migrations (checksummed, under an advisory lock) |
+| `npm run db:seed` | Inserts the two development merchants if absent |
+| `npm run seed:payments` | Creates ten payments through the payment services with fixed idempotency keys; refunds of captured payments complete on a later run, once settled |
+
+The `init` service runs all three in that order. Development data is not for production use.
