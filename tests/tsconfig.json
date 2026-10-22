@@ -12,5 +12,6 @@
       "@payments/*": ["../packages/*/src"]
     }
   },
-  "include": ["**/*.ts", "../packages/*/src/**/*.test.ts", "../apps/*/src/**/*.test.ts"]
+  "include": ["**/*.ts", "../packages/*/src/**/*.test.ts", "../apps/*/src/**/*.test.ts"],
+  "exclude": ["../apps/web"]
 }

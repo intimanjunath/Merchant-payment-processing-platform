@@ -3,7 +3,8 @@ module.exports = {
   testEnvironment: 'node',
   roots: ['<rootDir>/packages', '<rootDir>/apps', '<rootDir>/tests'],
   testMatch: ['**/*.test.ts'],
-  testPathIgnorePatterns: ['/node_modules/', '/dist/'],
+  // The dashboard's tests run under Vitest, with the browser-targeted build settings.
+  testPathIgnorePatterns: ['/node_modules/', '/dist/', '<rootDir>/apps/web/'],
   transform: {
     '^.+\\.ts$': ['ts-jest', { tsconfig: '<rootDir>/tests/tsconfig.json' }],
   },

@@ -18,8 +18,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "npm run build && jest --runInBand",
-    "check": "npm run format:check && npm run lint && npm run build && npm run typecheck:tests",
+    "test": "npm run build && jest --runInBand && npm run test --workspace @payments/web",
+    "check": "npm run format:check && npm run lint && npm run build && npm run typecheck:tests && npm run typecheck --workspace @payments/web && npm run build --workspace @payments/web",
     "db:migrate": "npm run build && npm run migrate --workspace @payments/db",
     "db:seed": "npm run build && npm run seed --workspace @payments/db"
   },
@@ -31,6 +31,7 @@
     "ajv": "8.20.0",
     "eslint": "10.13.0",
     "eslint-config-prettier": "10.1.8",
+    "eslint-plugin-react-hooks": "7.1.1",
     "globals": "17.13.0",
     "jest": "30.5.2",
     "prettier": "3.9.10",
