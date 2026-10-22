@@ -516,3 +516,49 @@ export async function listTransitions(db: Db, paymentId: string): Promise<Transi
   );
   return result.rows;
 }
+
+// The payment list (spec §5.5). Exported so a test can EXPLAIN exactly what runs.
+// $3 is a ready ILIKE pattern ('%' || escaped || '%'); backslash is the escape.
+// The cursor key keeps PostgreSQL's microseconds: a JavaScript Date would round
+// them away and make keyset paging skip or repeat rows created in one millisecond.
+export const LIST_PAYMENTS_SQL = `
+  SELECT ${PAYMENT_COLUMNS},
+         to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') AS "cursorCreatedAt"
+    FROM payments
+   WHERE merchant_id = $1
+     AND ($2::text IS NULL OR state = $2)
+     AND ($3::text IS NULL OR reference ILIKE $3 ESCAPE '\\')
+     AND ($4::timestamptz IS NULL OR (created_at, id) < ($4::timestamptz, $5::uuid))
+   ORDER BY created_at DESC, id DESC
+   LIMIT $6`;
+
+export interface ListedPayment extends PaymentRecord {
+  /** created_at to the microsecond, for the next page's cursor. */
+  cursorCreatedAt: string;
+}
+
+/** Escapes ILIKE wildcards so `%` and `_` in a search match themselves. */
+export function substringPattern(text: string): string {
+  return `%${text.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
+}
+
+export async function listPayments(
+  db: Db,
+  query: {
+    merchantId: string;
+    state: string | null;
+    search: string | null;
+    after: { createdAt: string; id: string } | null;
+    limit: number;
+  },
+): Promise<ListedPayment[]> {
+  const result = await db.query<ListedPayment>(LIST_PAYMENTS_SQL, [
+    query.merchantId,
+    query.state,
+    query.search === null ? null : substringPattern(query.search),
+    query.after?.createdAt ?? null,
+    query.after?.id ?? null,
+    query.limit,
+  ]);
+  return result.rows;
+}

@@ -43,7 +43,9 @@ export {
   insertPayment,
   insertSettlementJob,
   isUniqueViolation,
+  LIST_PAYMENTS_SQL,
   listOperations,
+  listPayments,
   listTransitions,
   lockOperation,
   lockOwnedJob,
@@ -53,10 +55,12 @@ export {
   requeueJob,
   resolveOperation,
   saveOperationResponse,
+  substringPattern,
   transitionPayment,
 } from './repositories/payments';
 export type {
   JobRecord,
+  ListedPayment,
   OperationAction,
   OperationRecord,
   OperationStatus,
