@@ -20,7 +20,7 @@ import { createFakeProvider, type PaymentProvider } from '@payments/provider';
 import type { Pool } from 'pg';
 
 import { migrateTestDatabase, SEEDED_MERCHANTS } from '../helpers/api';
-import { clearInjectedFaults, injectFault } from '../helpers/provider';
+import { clearInjectedFaults, injectFault, wrapProvider } from '../helpers/provider';
 import { testDatabaseUrl } from '../helpers/test-db';
 
 const RECOVERY_DELAY_MS = 5_000;
@@ -545,9 +545,7 @@ describe('finalization', () => {
           client.release();
         }
       };
-      return {
-        ...inner,
-        describePaymentMethod: (token) => inner.describePaymentMethod(token),
+      return wrapProvider(inner, {
         authorize: async (req) => {
           await probe(req.providerKey);
           return inner.authorize(req);
@@ -560,7 +558,7 @@ describe('finalization', () => {
           await probe(req.providerKey);
           return inner.refund(req);
         },
-      };
+      });
     }
 
     it('holds no lock on the payment, operation or job while the provider is called', async () => {

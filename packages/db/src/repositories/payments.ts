@@ -55,6 +55,7 @@ export interface JobRecord {
   status: string;
   dueAt: Date;
   attempts: number;
+  consecutiveFailures: number;
   leaseOwner: string | null;
   leaseExpiresAt: Date | null;
   leaseGeneration: number;
@@ -79,7 +80,7 @@ const OPERATION_COLUMNS = `
 
 const JOB_COLUMNS = `
   id, type, work_key AS "workKey", payment_id AS "paymentId", operation_id AS "operationId", status,
-  due_at AS "dueAt", attempts, lease_owner AS "leaseOwner", lease_expires_at AS "leaseExpiresAt",
+  due_at AS "dueAt", attempts, consecutive_failures AS "consecutiveFailures", lease_owner AS "leaseOwner", lease_expires_at AS "leaseExpiresAt",
   lease_generation::float8 AS "leaseGeneration", review_deadline AS "reviewDeadline",
   request_id AS "requestId", traceparent`;
 
@@ -318,21 +319,11 @@ export async function lockOperation(
   return result.rows[0];
 }
 
-/**
- * Locks the job only if it is still running under the caller's lease
- * generation. No row means the caller no longer owns the work.
- */
-export async function lockOwnedJob(
-  db: Db,
-  jobId: string,
-  generation: number,
-): Promise<JobRecord | undefined> {
+/** Locks the job row; the caller compares its lease generation with its own. */
+export async function lockJob(db: Db, jobId: string): Promise<JobRecord | undefined> {
   const result = await db.query<JobRecord>(
-    `SELECT ${JOB_COLUMNS}
-       FROM jobs
-      WHERE id = $1 AND status = 'running' AND lease_generation = $2
-        FOR UPDATE`,
-    [jobId, generation],
+    `SELECT ${JOB_COLUMNS} FROM jobs WHERE id = $1 FOR UPDATE`,
+    [jobId],
   );
   return result.rows[0];
 }
@@ -561,4 +552,56 @@ export async function listPayments(
     query.limit,
   ]);
   return result.rows;
+}
+
+// Claiming and leases (spec §5.5). Both touch only the job row.
+
+/**
+ * Claims up to `limit` due jobs of the given types for `owner`: queued jobs
+ * that are due, and running jobs whose lease expired. SKIP LOCKED means two
+ * workers never wait on, or both take, the same row. Each claim raises the
+ * lease generation, so a previous owner's late write can be told apart, and
+ * counts one attempt.
+ */
+export async function claimDueJobs(
+  db: Db,
+  claim: { owner: string; limit: number; leaseSeconds: number; types: readonly string[] },
+): Promise<JobRecord[]> {
+  const result = await db.query<JobRecord>(
+    `WITH next AS (
+       SELECT id AS next_id FROM jobs
+        WHERE type = ANY($4::text[])
+          AND ((status = 'queued' AND due_at <= now())
+            OR (status = 'running' AND lease_expires_at <= now()))
+        ORDER BY due_at
+        LIMIT $1
+          FOR UPDATE SKIP LOCKED
+     )
+     UPDATE jobs j
+        SET status = 'running',
+            lease_owner = $2,
+            lease_expires_at = now() + make_interval(secs => $3),
+            lease_generation = j.lease_generation + 1,
+            attempts = j.attempts + 1,
+            updated_at = now()
+       FROM next
+      WHERE j.id = next.next_id
+      RETURNING ${JOB_COLUMNS}`,
+    [claim.limit, claim.owner, claim.leaseSeconds, claim.types],
+  );
+  return result.rows;
+}
+
+/** Extends the lease if the caller still holds this generation; false means it was taken over. */
+export async function renewLease(
+  db: Db,
+  lease: { jobId: string; generation: number; leaseSeconds: number },
+): Promise<boolean> {
+  const result = await db.query(
+    `UPDATE jobs
+        SET lease_expires_at = now() + make_interval(secs => $3), updated_at = now()
+      WHERE id = $1 AND status = 'running' AND lease_generation = $2`,
+    [lease.jobId, lease.generation, lease.leaseSeconds],
+  );
+  return result.rowCount === 1;
 }

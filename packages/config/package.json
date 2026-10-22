@@ -1,0 +1,14 @@
+{
+  "name": "@payments/config",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Environment reading and validation shared by the API and the worker.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@payments/observability": "0.0.0"
+  }
+}

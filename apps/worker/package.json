@@ -1,0 +1,21 @@
+{
+  "name": "@payments/worker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Background worker: operation recovery and settlement.",
+  "main": "dist/main.js",
+  "scripts": {
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@payments/config": "0.0.0",
+    "@payments/db": "0.0.0",
+    "@payments/observability": "0.0.0",
+    "@payments/payments": "0.0.0",
+    "@payments/provider": "0.0.0",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  }
+}

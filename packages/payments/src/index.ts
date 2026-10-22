@@ -48,3 +48,5 @@ export { decodeCursor, encodeCursor } from './cursor';
 export type { CursorPosition, ListFilters } from './cursor';
 export { listPaymentsPage } from './list';
 export type { ListQuery } from './list';
+export { claimJobs, JOB_TYPES, renewJobLease } from './jobs';
+export type { JobType } from './jobs';

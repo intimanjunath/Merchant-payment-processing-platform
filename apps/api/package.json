@@ -11,6 +11,7 @@
     "@nestjs/common": "11.2.7",
     "@nestjs/core": "11.2.7",
     "@nestjs/platform-express": "11.2.7",
+    "@payments/config": "0.0.0",
     "@payments/db": "0.0.0",
     "@payments/observability": "0.0.0",
     "@payments/payments": "0.0.0",

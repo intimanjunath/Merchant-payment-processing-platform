@@ -3,7 +3,7 @@ import {
   insertAuditEvent,
   insertSettlementJob,
   lockOperation,
-  lockOwnedJob,
+  lockJob,
   lockPayment,
   markAwaitingConfirmation,
   type OperationAction,
@@ -16,7 +16,7 @@ import {
   withTransaction,
 } from '@payments/db';
 import type { Logger } from '@payments/observability';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 
 import { mutationResponse, type MutationResponse, rejectionResponse } from './resources';
 import {
@@ -148,8 +148,8 @@ export async function finalizeOperation(
     if (!payment || operation?.paymentId !== payment.id) {
       throw new Error('Finalize called for an operation that does not belong to the payment');
     }
-    if (RESOLVED.includes(operation.status)) return { kind: 'already_final' };
-    if (!(await lockOwnedJob(client, work.jobId, work.generation))) return { kind: 'lease_lost' };
+    const ownership = await checkOwnership(client, work, operation);
+    if (ownership) return { kind: ownership };
     if (payment.version !== operation.expectedVersion) return { kind: 'version_conflict' };
 
     const plan = planFinalization(operation.action, result);
@@ -236,8 +236,8 @@ export async function scheduleRecovery(
   const outcome = await withTransaction(deps.pool, async (client): Promise<ScheduleResult> => {
     const operation = await lockOperation(client, work.operationId);
     if (!operation) throw new Error('Operation to reschedule does not exist');
-    if (RESOLVED.includes(operation.status)) return { kind: 'already_final' };
-    if (!(await lockOwnedJob(client, work.jobId, work.generation))) return { kind: 'lease_lost' };
+    const ownership = await checkOwnership(client, work, operation);
+    if (ownership) return { kind: ownership };
 
     const awaiting = await markAwaitingConfirmation(client, operation.id, failure.reason);
     await requeueJob(client, {
@@ -263,6 +263,24 @@ export async function scheduleRecovery(
     logLeaseLost(deps.logger, work);
   }
   return outcome;
+}
+
+/**
+ * Locks the job (after payment and operation) and says why the caller must
+ * stop, if it must. The lease generation decides first: a different one means
+ * another owner claimed the job since, whatever state the operation is in, so
+ * a late answer from an expired owner is always reported as a lost lease.
+ * Only the current owner can see its own work as already final.
+ */
+async function checkOwnership(
+  client: PoolClient,
+  work: WorkRef,
+  operation: OperationRecord,
+): Promise<'lease_lost' | 'already_final' | undefined> {
+  const job = await lockJob(client, work.jobId);
+  if (job?.leaseGeneration !== work.generation) return 'lease_lost';
+  if (RESOLVED.includes(operation.status) || job.status !== 'running') return 'already_final';
+  return undefined;
 }
 
 /** Logged after commit, so a line never describes work that rolled back. */

@@ -31,6 +31,7 @@ export type {
   StoredOutcome,
 } from './repositories/provider';
 export {
+  claimDueJobs,
   completeJob,
   findOperation,
   findOperationByKey,
@@ -48,10 +49,11 @@ export {
   listPayments,
   listTransitions,
   lockOperation,
-  lockOwnedJob,
+  lockJob,
   lockPayment,
   lockPaymentForMerchant,
   markAwaitingConfirmation,
+  renewLease,
   requeueJob,
   resolveOperation,
   saveOperationResponse,
@@ -68,5 +70,7 @@ export type {
   TransitionRecord,
 } from './repositories/payments';
 export { isDatabaseUnavailable } from './errors';
+export { checkReadiness, DEFAULT_READINESS_TIMEOUT_MS } from './readiness';
+export type { CheckResult, Readiness, ReadinessLogger, ReadinessOptions } from './readiness';
 export { seed } from './seed';
 export { withTransaction } from './transaction';
