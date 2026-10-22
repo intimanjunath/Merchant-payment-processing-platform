@@ -79,7 +79,10 @@ payment-processing/
 │   │   ├── package.json
 │   │   ├── Dockerfile
 │   │   └── src/
-│   │       ├── main.ts          # Poll loop, shutdown and heartbeat
+│   │       ├── main.ts          # Wiring, signals and shutdown
+│   │       ├── config.ts        # Environment validation (spec §8)
+│   │       ├── worker.ts        # Poll loop: claims free slots, runs jobs in their log/trace context
+│   │       ├── heartbeat.ts     # Last poll-loop pass, for /health and a gauge
 │   │       ├── handlers/        # Settlement and operation recovery
 │   │       └── health.ts        # Worker health, readiness and metrics
 │   └── web/
@@ -99,6 +102,7 @@ payment-processing/
 │   │   ├── src/                # Pool, transactions and SQL repositories
 │   │   ├── migrations/         # Application and fake-provider schemas
 │   │   └── seeds/              # Two development merchants
+│   ├── config/src/             # Environment reading shared by the API and the worker
 │   ├── provider/src/           # Provider contract and durable fake adapter
 │   └── observability/src/      # JSON logger, metrics and trace context
 └── tests/

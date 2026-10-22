@@ -263,7 +263,7 @@ Responses from steps 1–4 and 6–8 are not stored as idempotent results, becau
 | HTTP request in | Accept a valid `X-Request-Id`, otherwise generate one; echo it in the response | Accept a valid `traceparent`, otherwise start a new trace |
 | Reservation (TX1) | Stored on `operations.request_id` and `jobs.request_id` | Stored on `operations.traceparent` and `jobs.traceparent` |
 | Settlement job created at capture | Copied from the capture operation | Copied from the capture operation |
-| Worker run | Logs both the job's original `requestId` and its own `workerRunId` | Starts a span linked to the stored context (a link, not a parent, because the work runs later) |
+| Worker run | Logs both the job's original `requestId` and its own `workerRunId` | Continues the stored trace: same `traceId`, a new `spanId`, and the stored span logged as `followsFromSpanId` (the work runs later, so it follows from the request rather than nesting inside it) |
 | Provider call | `requestId` in log fields | Child span of the current span |
 
 Searching logs for one `requestId` shows the API request, the provider call, every worker attempt and the settlement.
@@ -519,8 +519,8 @@ Order: `created_at DESC, id DESC`. `nextCursor` is `null` on the last page. A cu
 |---|---|---|---|
 | `GET /health` | API | Process is serving | `{ "status": "ok" }` |
 | `GET /ready` | API | Database reachable and all migrations applied | `{ "status": "ready", "checks": { "database": "ok", "migrations": "ok" } }`; 503 with the failing check otherwise |
-| `GET /health` | Worker | Poll loop heartbeat within 30 s | `{ "status": "ok", "lastHeartbeatAt": "..." }`; 503 when stale |
-| `GET /ready` | Worker | Database reachable, migrations applied, not shutting down | Same shape as the API |
+| `GET /health` | Worker | Poll loop heartbeat within 30 s (three heartbeat intervals) | `{ "status": "ok", "lastHeartbeatAt": "..." }`; 503 with `"status": "stale"` |
+| `GET /ready` | Worker | Database reachable, migrations applied, not shutting down | The API's shape plus `"shuttingDown": false`; 503 once shutdown begins |
 | `GET /metrics` | Both | Always | Prometheus text format |
 | `GET /openapi.json` | API | Always | The OpenAPI 3.1 description of every API route |
 
@@ -778,9 +778,10 @@ No transaction holds a lock while calling the provider.
 
 ```sql
 WITH next AS (
-  SELECT id FROM jobs
-  WHERE (status = 'queued'  AND due_at <= now())
-     OR (status = 'running' AND lease_expires_at <= now())
+  SELECT id AS next_id FROM jobs
+  WHERE type = ANY($4)  -- only types this worker has handlers for
+    AND ((status = 'queued'  AND due_at <= now())
+      OR (status = 'running' AND lease_expires_at <= now()))
   ORDER BY due_at
   LIMIT $1          -- free slots, 1 by default
   FOR UPDATE SKIP LOCKED
@@ -793,7 +794,7 @@ SET status = 'running',
     attempts = j.attempts + 1,
     updated_at = now()
 FROM next
-WHERE j.id = next.id
+WHERE j.id = next.next_id
 RETURNING j.*;
 ```
 
@@ -815,10 +816,11 @@ BEGIN;
 -- 1. Lock in order: payment, operation, job
 SELECT state, version FROM payments WHERE id = $payment FOR UPDATE;
 SELECT status FROM operations WHERE id = $operation FOR UPDATE;
-SELECT lease_generation FROM jobs
-WHERE id = $job AND status = 'running' AND lease_generation = $gen FOR UPDATE;
--- Stop with ROLLBACK if the operation is already resolved (duplicate
--- finalization) or no job row matched (ownership lost: log job.lease_lost).
+SELECT status, lease_generation FROM jobs WHERE id = $job FOR UPDATE;
+-- Stop with ROLLBACK if lease_generation <> $gen (ownership lost: log
+-- job.lease_lost), checked first, so a late answer from an expired owner is
+-- always reported as such; otherwise if the operation is already resolved or
+-- the job is not running (duplicate finalization by the current owner).
 
 -- 2a. Outcome changes payment state: authorize succeeded, create declined or
 --     not received, capture succeeded, refund succeeded.
