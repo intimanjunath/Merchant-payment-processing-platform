@@ -18,6 +18,8 @@ export interface Session {
   api: ApiClient;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
+  /** Checks the session again, after the first check could not reach the server. */
+  checkSession: () => Promise<void>;
 }
 
 export const SessionContext = createContext<Session | null>(null);
@@ -59,10 +61,11 @@ export function SessionProvider({ children }: { children: ReactNode }) {
     [controller],
   );
   const signOut = useCallback(() => controller.signOut(), [controller]);
+  const checkSession = useCallback(() => controller.load(), [controller]);
 
   const value = useMemo(
-    () => ({ state, api: controller.api, signIn, signOut }),
-    [state, controller, signIn, signOut],
+    () => ({ state, api: controller.api, signIn, signOut, checkSession }),
+    [state, controller, signIn, signOut, checkSession],
   );
   return <SessionContext.Provider value={value}>{children}</SessionContext.Provider>;
 }

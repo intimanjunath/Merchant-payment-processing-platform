@@ -1,4 +1,4 @@
-import { ApiClient } from './api';
+import { ApiClient, ApiRequestError } from './api';
 import { clearMerchantRecords } from './browser-records';
 
 export interface Merchant {
@@ -15,7 +15,14 @@ export interface SessionResponse {
 
 export type SessionState =
   | { status: 'loading' }
-  | { status: 'signed_out'; reason: 'none' | 'signed_out' | 'expired' }
+  /** The session check got no usable answer (network or server failure); it can be retried. */
+  | { status: 'unavailable'; message: string; requestId: string | null }
+  | {
+      status: 'signed_out';
+      reason: 'none' | 'signed_out' | 'expired';
+      /** The merchant whose session just ended here; null when there was none. */
+      previousMerchantId: string | null;
+    }
   | {
       status: 'signed_in';
       merchant: Merchant;
@@ -80,6 +87,8 @@ export class SessionController {
 
   /** On page load: is there a session already? Ignored if a sign-in finished first. */
   async load(signal?: AbortSignal): Promise<void> {
+    // A retry after a failed check shows the check in progress again.
+    if (this.state.status === 'unavailable') this.set({ status: 'loading' });
     const startedUnder = this.generation;
     try {
       const session = await this.api.get<SessionResponse>(
@@ -87,10 +96,23 @@ export class SessionController {
         signal ? { signal } : {},
       );
       if (this.generation === startedUnder) this.adopt(session);
-    } catch {
-      // No session, or the API is unreachable: show sign-in, unless something else settled it meanwhile.
-      if (!signal?.aborted && this.generation === startedUnder && this.state.status === 'loading') {
-        this.set({ status: 'signed_out', reason: 'none' });
+    } catch (error) {
+      // Only if nothing else (a sign-in, a newer check) settled the session meanwhile.
+      if (signal?.aborted || this.generation !== startedUnder || this.state.status !== 'loading') {
+        return;
+      }
+      // Only a 401 means "not signed in". Anything else says nothing about the session.
+      if (error instanceof ApiRequestError && error.code === 'UNAUTHENTICATED') {
+        this.set({ status: 'signed_out', reason: 'none', previousMerchantId: null });
+      } else {
+        this.set({
+          status: 'unavailable',
+          message:
+            error instanceof ApiRequestError
+              ? error.message
+              : 'The dashboard couldn’t check your session.',
+          requestId: error instanceof ApiRequestError ? error.requestId : null,
+        });
       }
     }
   }
@@ -141,8 +163,9 @@ export class SessionController {
   /** Ends the session only if `generation` is still the current session's. */
   private endIfCurrent(generation: number, reason: 'signed_out' | 'expired'): void {
     if (this.state.status !== 'signed_in' || this.state.generation !== generation) return;
+    const previousMerchantId = this.state.merchant.id;
     this.clearExpiryTimer();
-    this.set({ status: 'signed_out', reason });
+    this.set({ status: 'signed_out', reason, previousMerchantId });
   }
 
   private clearExpiryTimer(): void {

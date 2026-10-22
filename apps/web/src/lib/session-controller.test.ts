@@ -33,16 +33,21 @@ class ControlledFetch {
     path: string;
     csrf: string | undefined;
     answer: (response: Response) => void;
+    /** Fails the request as fetch does when the network is down. */
+    fail: () => void;
   }[] = [];
 
   readonly fetch = (input: RequestInfo | URL, init?: RequestInit): Promise<Response> =>
-    new Promise((resolve) => {
+    new Promise((resolve, reject) => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
       this.calls.push({
         method: init?.method ?? 'GET',
         path: typeof input === 'string' ? input : input instanceof URL ? input.href : input.url,
         csrf: headers['X-CSRF-Token'],
         answer: resolve,
+        fail: () => {
+          reject(new TypeError('Failed to fetch'));
+        },
       });
     });
 
@@ -207,7 +212,11 @@ describe('SessionController', () => {
       expect(timer?.ms).toBe(60_000);
       timer?.callback();
 
-      expect(controller.getState()).toEqual({ status: 'signed_out', reason: 'expired' });
+      expect(controller.getState()).toEqual({
+        status: 'signed_out',
+        reason: 'expired',
+        previousMerchantId: ACME.id,
+      });
     });
 
     it('ends on a 401 from one of its own requests', async () => {
@@ -217,7 +226,11 @@ describe('SessionController', () => {
       network.last('/api/payments').answer(unauthenticated());
       await request;
 
-      expect(controller.getState()).toEqual({ status: 'signed_out', reason: 'expired' });
+      expect(controller.getState()).toEqual({
+        status: 'signed_out',
+        reason: 'expired',
+        previousMerchantId: ACME.id,
+      });
       expect(timers.scheduled.at(-1)?.cleared).toBe(true);
     });
 
@@ -232,7 +245,11 @@ describe('SessionController', () => {
       await signingOut;
 
       expect(logout.csrf).toBe('csrf-1');
-      expect(controller.getState()).toEqual({ status: 'signed_out', reason: 'signed_out' });
+      expect(controller.getState()).toEqual({
+        status: 'signed_out',
+        reason: 'signed_out',
+        previousMerchantId: ACME.id,
+      });
       expect(storage.getItem(recordKey(ACME.id, 'pending:create'))).toBeNull();
       expect(storage.getItem(recordKey(BICYCLE.id, 'pending:create'))).toBe('{}');
     });
@@ -274,7 +291,90 @@ describe('SessionController', () => {
       network.last('/api/auth/session').answer(unauthenticated());
       await without;
       await flush();
-      expect(other.getState()).toEqual({ status: 'signed_out', reason: 'none' });
+      expect(other.getState()).toEqual({
+        status: 'signed_out',
+        reason: 'none',
+        previousMerchantId: null,
+      });
+    });
+  });
+
+  describe('the page-load session check', () => {
+    async function check(answer: (call: ReturnType<ControlledFetch['last']>) => void) {
+      const loading = controller.load();
+      answer(network.last('/api/auth/session'));
+      await loading;
+      await flush();
+    }
+
+    it('treats a 401 as signed out', async () => {
+      await check((call) => {
+        call.answer(unauthenticated());
+      });
+      expect(controller.getState()).toEqual({
+        status: 'signed_out',
+        reason: 'none',
+        previousMerchantId: null,
+      });
+    });
+
+    it('treats a server error as unavailable, not signed out', async () => {
+      await check((call) => {
+        call.answer(
+          json(503, {
+            error: {
+              code: 'SERVICE_UNAVAILABLE',
+              message: 'The service is temporarily unavailable.',
+              requestId: 'req-503',
+            },
+          }),
+        );
+      });
+      expect(controller.getState()).toEqual({
+        status: 'unavailable',
+        message: 'The service is temporarily unavailable.',
+        requestId: 'req-503',
+      });
+    });
+
+    it('treats a proxy answer without an envelope as unavailable', async () => {
+      await check((call) => {
+        call.answer(new Response('Bad Gateway', { status: 502 }));
+      });
+      expect(controller.getState()).toMatchObject({ status: 'unavailable', requestId: null });
+    });
+
+    it('treats a network failure as unavailable', async () => {
+      await check((call) => {
+        call.fail();
+      });
+      expect(controller.getState()).toEqual({
+        status: 'unavailable',
+        message: 'The server could not be reached. Check your connection and try again.',
+        requestId: null,
+      });
+    });
+
+    it('checks again on request: loading, then whatever the server now says', async () => {
+      await check((call) => {
+        call.fail();
+      });
+
+      const retry = controller.load();
+      expect(controller.getState()).toEqual({ status: 'loading' });
+      network.last('/api/auth/session').answer(json(200, sessionBody(ACME, 'csrf-1')));
+      await retry;
+      expect(controller.getState()).toMatchObject({ status: 'signed_in', merchant: ACME });
+    });
+
+    it('shows sign-in when the check again finds no session', async () => {
+      await check((call) => {
+        call.answer(new Response('Bad Gateway', { status: 502 }));
+      });
+      await check((call) => {
+        call.answer(unauthenticated());
+      });
+      expect(controller.getState()).toMatchObject({ status: 'signed_out', reason: 'none' });
     });
   });
 });

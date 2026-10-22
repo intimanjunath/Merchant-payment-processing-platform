@@ -27,6 +27,8 @@ export const theme = createTheme({
     error: { main: tokens.alert },
     // Notices (signed out, session ended) in the ink's own blue-slate, not a stock blue.
     info: { main: '#3B5B73' },
+    // Server trouble (not the merchant's mistake): a muted amber, not a stock orange.
+    warning: { main: '#8A5A12' },
     divider: tokens.rule,
   },
   shape: { borderRadius: 6 },

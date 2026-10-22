@@ -8,6 +8,7 @@ import { Navigate, useLocation } from 'react-router';
 
 import { LifecycleRail } from '../components/LifecycleRail';
 import { ApiRequestError } from '../lib/api';
+import { returnPath } from '../lib/return-to';
 import { useSession } from '../lib/use-session';
 import { tokens } from '../theme';
 
@@ -31,15 +32,15 @@ function describe(error: unknown): string {
 }
 
 export function SignInPage() {
-  const { state, signIn } = useSession();
+  const { state, signIn, checkSession } = useSession();
   const location = useLocation();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const from = (location.state as { from?: string } | null)?.from ?? '/';
-
-  if (state.status === 'signed_in') return <Navigate to={from} replace />;
+  if (state.status === 'signed_in') {
+    return <Navigate to={returnPath(location.state, state.merchant.id)} replace />;
+  }
 
   // Once an attempt fails, its error is the only thing worth reading.
   const notice = error
@@ -89,6 +90,25 @@ export function SignInPage() {
         {notice && (
           <Alert severity="info" sx={{ mb: 3 }}>
             {notice}
+          </Alert>
+        )}
+        {!error && state.status === 'unavailable' && (
+          <Alert
+            severity="warning"
+            sx={{ mb: 3 }}
+            action={
+              <Button
+                color="inherit"
+                size="small"
+                onClick={() => void checkSession()}
+                sx={{ whiteSpace: 'nowrap' }}
+              >
+                Check again
+              </Button>
+            }
+          >
+            The payment server can’t be reached, so the dashboard couldn’t check whether you’re
+            signed in. {state.message}
           </Alert>
         )}
         {error && (
