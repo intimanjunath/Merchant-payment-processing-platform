@@ -39,7 +39,7 @@ The API and worker share payment services. Controllers handle HTTP, services enf
 
 This document records decisions and tradeoffs. The exact contracts the code must match are in `project_spec.md`: component and package boundaries, sequence diagrams for each flow, request and response shapes, database DDL, provider contract, log events, metric names and configuration.
 
-Organize code into `apps/api`, `apps/worker`, `apps/web`, and shared `packages/payments`, `packages/db`, `packages/provider`, `packages/observability`. Use Docker Compose for local API, worker, web and PostgreSQL services, and run builds and tests in containers too. The Node version is pinned to the current LTS in `.nvmrc` and the Dockerfiles, so the host's Node version does not matter.
+Organize code into `apps/api`, `apps/worker`, `apps/web`, and shared `packages/payments`, `packages/db`, `packages/provider`, `packages/observability`. Use Docker Compose for local API, worker, web and PostgreSQL services, and run builds and tests in containers too. The Node version is pinned to the current LTS in `.nvmrc` and the Dockerfile, so the host's Node version does not matter. One root `Dockerfile` builds the workspace once: its `app` target (compiled packages and the API's and worker's production dependencies) runs the API, the worker and a one-shot `init` job (migrations, development merchants and payments), and its `web` target is nginx serving the built dashboard with `/api` proxied to the API. `docker compose up --build` starts all of it.
 
 ### Project structure
 
@@ -58,13 +58,14 @@ payment-processing/
 ├── .prettierrc
 ├── .prettierignore
 ├── tsconfig.base.json
-├── compose.yaml                 # API, worker, web and PostgreSQL
+├── Dockerfile                   # One build; targets `app` (API, worker, init) and `web` (nginx)
+├── .dockerignore                # Allowlist: only the workspace sources reach the build
+├── compose.yaml                 # PostgreSQL, init job, API, worker and web
 ├── .env.example
 ├── .gitignore
 ├── apps/
 │   ├── api/
 │   │   ├── package.json
-│   │   ├── Dockerfile
 │   │   └── src/
 │   │       ├── main.ts
 │   │       ├── app.ts           # Builds the Nest app (shared by main.ts and tests)
@@ -79,7 +80,6 @@ payment-processing/
 │   │       └── common/          # Request IDs and consistent HTTP errors
 │   ├── worker/
 │   │   ├── package.json
-│   │   ├── Dockerfile
 │   │   └── src/
 │   │       ├── main.ts          # Wiring, signals and shutdown
 │   │       ├── config.ts        # Environment validation (spec §8)
@@ -89,9 +89,9 @@ payment-processing/
 │   │       └── health.ts        # Worker health, readiness and metrics
 │   └── web/
 │       ├── package.json
-│       ├── Dockerfile
 │       ├── index.html
 │       ├── vite.config.ts
+│       ├── nginx.conf          # The dashboard's server in Compose: static files, /api proxied
 │       └── src/
 │           ├── main.tsx
 │           ├── App.tsx

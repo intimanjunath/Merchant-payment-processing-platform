@@ -27,7 +27,8 @@ flowchart LR
         C[API client: curl, scripts]
     end
     subgraph Local Docker Compose
-        WEB[web: Vite + React<br/>:5173]
+        INIT[init: migrations and seeds<br/>one-shot]
+        WEB[web: nginx + built React app<br/>:5173]
         API[api: NestJS<br/>:3000]
         WRK[worker: Node<br/>health :3001]
         DB[(db: PostgreSQL 18<br/>:5432, safe defaults)]
@@ -37,6 +38,7 @@ flowchart LR
     WEB -->|proxy /api/*, prefix stripped| API
     C -->|Bearer JWT| API
     API -->|app schema + provider schema| DB
+    INIT -->|migrate, seed| DB
     WRK -->|app schema + provider schema| DB
 ```
 
@@ -45,6 +47,7 @@ flowchart LR
 | `web` | Login, payment list/search, create, details, capture/refund buttons, pending-action recovery | Touch the database or provider; decide lifecycle rules |
 | `api` | Authentication, request validation, idempotency, reservation, synchronous provider call, finalization, read APIs, health and metrics | Run background polling |
 | `worker` | Claim due jobs; operation recovery; settlement; heartbeat; queue and state gauges | Serve merchant traffic |
+| `init` | Before the API and worker start: migrations, the development merchants and their payments; exits | Run in production as is (the seeds are development data) |
 | `db` | Application schema (`public`) and fake-provider schema (`provider`) | — |
 | `test-db` | Disposable database for automated tests only | Hold any data worth keeping |
 
@@ -79,13 +82,13 @@ Rules: lifecycle decisions live only in `packages/payments`. Controllers and wor
 
 | Service | Port | Purpose |
 |---|---|---|
-| web | 5173 | Dashboard (Vite dev server; `/api/*` is proxied to the API with the prefix stripped, so every other path, such as `/payments/:id`, stays a dashboard page on reload) |
+| web | 5173 | Dashboard: nginx serving the built app in Compose, or the Vite dev server in development. Both proxy `/api/*` to the API with the prefix stripped, so every other path, such as `/payments/:id`, stays a dashboard page on reload |
 | api | 3000 | Merchant API, `/health`, `/ready`, `/metrics` |
 | worker | 3001 | `/health`, `/ready`, `/metrics` only |
 | db | 5432 | Development database |
 | test-db | 5433 | Automated tests |
 
-Database host ports are defaults; `DB_HOST_PORT` and `TEST_DB_HOST_PORT` override them when another local PostgreSQL already uses them. Services always connect over the Compose network (`db:5432`, `test-db:5432`).
+Host ports are defaults; `DB_HOST_PORT`, `TEST_DB_HOST_PORT`, `API_HOST_PORT`, `WORKER_HOST_PORT` and `WEB_HOST_PORT` override them when something else already uses them (a different web port also needs `ALLOWED_ORIGINS` to name it). Services always connect over the Compose network (`db:5432`, `test-db:5432`).
 
 ## 2. Data flows
 
