@@ -16,36 +16,60 @@ Everything runs locally with one command. A simulated payment provider reproduce
 
 ## Contents
 
-- [Documentation deliverables](#documentation-deliverables)
+- [For reviewers](#for-reviewers)
 - [Functional requirements](#functional-requirements)
 - [Dashboard](#dashboard)
 - [Tech stack](#tech-stack)
-- [System design](#system-design)
+- [Architectural overview](#architectural-overview)
 - [Architectural decisions](#architectural-decisions)
 - [Operational thinking](#operational-thinking)
-- [Engineering tradeoffs](#engineering-tradeoffs)
-- [Getting started](#getting-started)
+- [Tradeoffs made](#tradeoffs-made)
+- [Setup instructions](#setup-instructions)
 - [Project structure](#project-structure)
-- [Assumptions and limitations](#assumptions-and-limitations)
+- [Assumptions](#assumptions)
 - [Usage](#usage)
 - [Operations](#operations)
 - [Testing](#testing)
-- [Path to production](#path-to-production)
-- [If more time were available](#if-more-time-were-available)
+- [Production considerations](#production-considerations)
+- [Areas for future improvement](#areas-for-future-improvement)
 - [Documentation](#documentation)
 
-## Documentation deliverables
+## For reviewers
 
-Where each required piece of documentation can be found:
+**Full documentation (PDF):** [Payment_Processing_Platform_Documentation.pdf](Payment_Processing_Platform_Documentation.pdf). Sections 2 to 7 are the six documentation deliverables, in the brief's order; section 8 answers the rest of the brief item by item (evaluation criteria, functional requirements, observability and operational requirements, technical expectations).
 
-| Deliverable | Summary | Where |
-|---|---|---|
-| Setup instructions | One command with Docker Compose; nothing else to install | [Getting started](#getting-started) |
-| Architectural overview | An API, a worker and a dashboard around one PostgreSQL database, with a simulated provider | [System design](#system-design), [design §2](design_doc.md#2-architecture) |
-| Tradeoffs made | A database-backed queue, explicit SQL and a simulated provider, chosen for correctness and simplicity over throughput and integration | [Engineering tradeoffs](#engineering-tradeoffs), [design §2.2](design_doc.md#22-technology-decisions) |
-| Assumptions | USD only, full captures and refunds, refunds after settlement, provider guarantees | [Assumptions and limitations](#assumptions-and-limitations), [design §13](design_doc.md#13-assumptions) |
-| Production considerations | TLS, secrets, managed database, real provider, CI, alerting, tracing backend | [Path to production](#path-to-production), [design §14](design_doc.md#14-production-readiness) |
-| Areas for future improvement | Resume tool for paused work, end-to-end tests, real provider, wider payment features | [If more time were available](#if-more-time-were-available), [design §15](design_doc.md#15-future-improvements) |
+The six documentation deliverables, each under its own heading in this README:
+
+| Deliverable | Summary |
+|---|---|
+| [Setup instructions](#setup-instructions) | One command with Docker Compose; sign-in details, test cards and how to run the tests |
+| [Architectural overview](#architectural-overview) | An API, a worker and a dashboard around one PostgreSQL database, with a simulated provider; diagram and components |
+| [Tradeoffs made](#tradeoffs-made) | What was chosen and what was given up |
+| [Assumptions](#assumptions) | Decisions where the brief was open: currency, amounts, refunds, settlement, provider guarantees |
+| [Production considerations](#production-considerations) | Known limitations, and what to ship instead of each local piece |
+| [Areas for future improvement](#areas-for-future-improvement) | Prioritized next steps |
+
+What the brief evaluates, and where to look in this README:
+
+| Criterion | Where to look |
+|---|---|
+| System design | [Architectural overview](#architectural-overview), especially [How a payment request is processed](#how-a-payment-request-is-processed); every failure case and its handling in [`design_doc.md` §6.1](design_doc.md#61-failure-modes) |
+| Code quality | [Engineering standards](#engineering-standards), [Project structure](#project-structure), [Testing](#testing) |
+| Architectural decisions | [Architectural decisions](#architectural-decisions); each technology choice with its reason and cost in [`design_doc.md` §2.2](design_doc.md#22-technology-decisions) |
+| Operational thinking | [Operational thinking](#operational-thinking), [Operations](#operations) |
+| Engineering tradeoffs | [Tradeoffs made](#tradeoffs-made), [Production considerations](#production-considerations) |
+
+The operational requirements, and where each is covered:
+
+| Topic | Covered in |
+|---|---|
+| Observability: structured logs, correlation ID across API and worker, no PAN or CVV in logs, RED and business metrics, queue depth, lag and retries, tracing adoption | [Operational thinking](#operational-thinking), [Operations](#operations) |
+| Reliability: idempotent create, capture and refund, retries with backoff, dead-letter handling | [Operational thinking](#operational-thinking), [Background work and failure handling](#background-work-and-failure-handling) |
+| Audit trail of state transitions; health and readiness endpoints | [Operational thinking](#operational-thinking), [Service endpoints](#service-endpoints) |
+| Authentication: how the token is validated and how a login expires | [Authentication](#authentication) |
+| Repository hygiene | Public repository; no secrets or `.env` committed (only `.env.example`, with development-only values); a fresh clone runs by following [Setup instructions](#setup-instructions) alone |
+
+Deeper detail is in [`design_doc.md`](design_doc.md) (decisions, failure analysis, security, scalability) and [`project_spec.md`](project_spec.md) (contracts).
 
 ## Functional requirements
 
@@ -110,7 +134,7 @@ How the codebase handles each area of technical quality:
 | Maintainability | Strict TypeScript, lint and formatting enforced, small modules, decisions and contracts written down |
 | Observability and logging | See [Operational thinking](#operational-thinking) |
 
-## System design
+## Architectural overview
 
 ### Architecture
 
@@ -140,11 +164,18 @@ flowchart LR
 
 Every create, capture and refund follows the same three steps:
 
-1. **Reserve.** One short transaction records the operation, its recovery job and an audit row, keyed by the client's `Idempotency-Key`. A capture or refund locks the payment row first, so two concurrent requests can't both go ahead.
+1. **Reserve.** One short transaction records the operation and its recovery job (and, for a new payment, the payment and its first audit row), keyed by the client's `Idempotency-Key`. A capture or refund locks the payment row first, so two concurrent requests can't both go ahead.
 2. **Call the provider,** with no database lock held. A slow provider never blocks other payments.
 3. **Finalize.** A second transaction writes the outcome, but only if this process still owns the job and the payment hasn't changed (compare-and-set on its version).
 
 If the provider times out, the payment keeps its state, the API answers `202 Accepted`, and the worker finds out what really happened. Repeating a request with the same key returns the stored response instead of acting again.
+
+### Authentication
+
+- **Sign-in:** `POST /auth/login` (dashboard) or `POST /auth/token` (API clients) checks the Argon2id password hash, creates a session row and issues a JWT signed with HS256, carrying the merchant ID, session ID, issuer, audience and expiry.
+- **Transport:** the dashboard receives the token in an HttpOnly cookie and sends a CSRF token with every change; API clients send it as `Authorization: Bearer`.
+- **Validation on every request:** signature, algorithm, issuer, audience and expiry are checked, then the session row must still be active and belong to that merchant.
+- **Expiry:** a login lasts 8 hours (`SESSION_TTL_SECONDS`) and ends immediately on sign-out, which revokes the session. Failed sign-ins are throttled per email and per IP address.
 
 ### Payment lifecycle
 
@@ -163,9 +194,9 @@ Captures and refunds are for the full amount. Any other move is rejected with `4
 
 ### Background work and failure handling
 
-The worker claims due jobs with `SELECT … FOR UPDATE SKIP LOCKED` and holds each one under a lease with a generation number. Several workers can run side by side without ever processing the same job, and a worker that stalls can't overwrite the result of the one that took over.
+The worker claims due jobs with `SELECT … FOR UPDATE SKIP LOCKED` and holds each one under a lease with a generation number. Two workers never claim the same job at once. If a worker stalls and its lease expires, another worker takes the job over, and the stalled worker's late result is discarded by the generation check.
 
-- **Recovery** asks the provider for the outcome of an uncertain action and re-sends what it never received.
+- **Recovery** asks the provider for the outcome of an uncertain action. A capture or refund the provider never received is re-sent; an authorization it never received fails the payment and is not retried.
 - **Settlement** confirms that captured funds are available, about ten seconds after capture.
 - **Retries:** a timeout or an unreachable provider is retried three times with backoff (about 2, 4 and 8 seconds, with jitter).
 - **Dead letter:** when retries run out, or the work is still unresolved after 30 minutes, the job is paused: a create, capture or refund becomes `needs_review`, and a settlement is flagged for review. Paused work stays visible in the dashboard and in the `jobs_paused` metric, and blocks other actions on that payment until someone resolves it.
@@ -187,18 +218,19 @@ Each observability and operational requirement of the brief, and how it is met:
 | Structured logs | JSON lines (Pino), each with a named event |
 | Correlation ID across the API and the async workflow | The request ID is stored on operations and jobs, and the worker logs under it |
 | Deliberate log levels | `info` for state changes, `warn` for retries and timeouts, `error` for dead-lettered work, `debug` for routine polling |
-| No sensitive data in logs | Key-based redaction at any depth; request and response bodies never logged; card numbers never accepted |
+| No sensitive data in logs (no PAN or CVV) | Card numbers and CVVs are never accepted, only provider tokens; key-based redaction of passwords, tokens and secrets at any depth; request and response bodies never logged |
 | Request rate, errors, latency | `http_requests_total`, `http_request_duration_seconds` per route |
 | Business metrics by state | `payment_transitions_total`, `payments_by_state` |
 | Queue depth, lag, retries and failures | `jobs_due`, `jobs_lag_seconds`, `job_runs_total`, `jobs_paused` |
-| Trace across the API and async work | W3C `traceparent` stored on the job and continued by the worker; ready for an OpenTelemetry collector |
+| Trace across the API and async work | W3C `traceparent` stored on the job and continued by the worker; trace and span IDs in every log line |
+| Adopting distributed tracing | Add the OpenTelemetry SDK and a collector (for example with Tempo or Jaeger); the trace context already propagated through requests and jobs becomes the parent of the new spans |
 | Health and readiness | `/health` and `/ready` on the API and the worker |
 | Audit trail of state changes | One row per transition: who, when, from, to, why, and the originating request |
 | Consistent errors | One error envelope with a code, a message and the request ID |
 | Idempotent create, capture, refund | `Idempotency-Key` with the stored response replayed on retry |
 | Retries, timeouts, dead-letter | 5-second provider timeout; three retries with backoff; then `needs_review` |
 
-## Engineering tradeoffs
+## Tradeoffs made
 
 | Chose | Gave up |
 |---|---|
@@ -208,9 +240,9 @@ Each observability and operational requirement of the brief, and how it is met:
 | Hand-written SQL | ORM conveniences such as generated queries |
 | A simulated provider | A real provider integration |
 | Full captures and refunds, USD only | Partial amounts and multiple currencies |
-| Docker Compose for running locally | Production orchestration (see [Path to production](#path-to-production)) |
+| Docker Compose for running locally | Production orchestration (see [Production considerations](#production-considerations)) |
 
-## Getting started
+## Setup instructions
 
 ### Prerequisites
 
@@ -228,7 +260,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-The first build takes a few minutes. To check that everything is up, run `docker compose ps` in another terminal: `api` and `worker` should be `healthy` and `web` `running`.
+`.env.example` holds development-only values; your copy, `.env`, is ignored by git. The first build takes a few minutes. To check that everything is up, run `docker compose ps` in another terminal: `api` and `worker` should be `healthy` and `web` `running`.
 
 ### 2. Sign in
 
@@ -256,6 +288,16 @@ The dashboard accepts only these test cards; real card numbers are rejected.
 | Visa ending 0002 | `pm_card_declined` | Declined by the bank; the payment is **Failed** |
 | Mastercard ending 4444 | `pm_timeout` | The request never reaches the bank; after about 10 seconds the worker marks it **Failed** |
 | Amex ending 0005 | `pm_lost_response` | Approved, but the bank's answer is lost; after about 10 seconds the worker confirms it **Authorized** |
+
+### Run the tests
+
+```sh
+docker compose run --rm dev npm ci          # install packages once, after a fresh clone
+docker compose run --rm dev npm run check   # format, lint, type-check, build
+docker compose run --rm dev npm test        # all backend and dashboard tests
+```
+
+What the tests cover, and the latest results, are under [Testing](#testing).
 
 ### Service endpoints
 
@@ -307,9 +349,9 @@ Dockerfile        One build with two targets: app (API, worker, init) and web (n
 compose.yaml      Local stack: databases, init job, API, worker, dashboard
 ```
 
-## Assumptions and limitations
+## Assumptions
 
-**Assumptions** ([details](design_doc.md#13-assumptions))
+Decisions made where the brief was open ([details](design_doc.md#13-assumptions)):
 
 - USD only, in integer cents, from $0.01 to $1,000,000.00.
 - Full captures and refunds; refunds only after settlement.
@@ -317,17 +359,6 @@ compose.yaml      Local stack: databases, init job, API, worker, dashboard
 - An authorization the provider never received fails; it isn't retried later.
 - One user per merchant account.
 - The provider deduplicates requests by key, answers lookups, and never lets a "not received" request succeed later.
-
-**Known limitations**
-
-| Limitation | Effect | Resolved by |
-|---|---|---|
-| Plain HTTP (`COOKIE_SECURE=false`) | Local use only; the API refuses `NODE_ENV=production` without secure cookies | TLS (see below) |
-| Shared per-IP login limit behind nginx (`TRUST_PROXY=false`) | All browser users count against one limit of 50 failures per 15 minutes; the per-email limit still applies | Trusted proxy configuration |
-| Simulated provider | No real money movement | A real provider adapter |
-| No resume tool for paused work | Resolving `needs_review` needs a manual decision | Operator tooling |
-| Development seeds and secrets in `.env.example` | Not for any shared environment | A secrets manager |
-| Dashboard bundle just over 500 kB (MUI) | Vite build warning | Route-level code splitting |
 
 ## Usage
 
@@ -420,6 +451,7 @@ There is no resume command yet; resolving paused work is a deliberate, manual de
 ## Testing
 
 ```sh
+docker compose run --rm dev npm ci          # install packages once, after a fresh clone
 docker compose run --rm dev npm run check   # format, lint, type-check, build
 docker compose run --rm dev npm test        # Jest (API, worker, packages), then Vitest (dashboard)
 ```
@@ -433,7 +465,7 @@ Integration tests run against real PostgreSQL, not mocks, because the correctnes
 | Unit | State machine, request hashing, cursor signing, retry delays, log redaction, configuration |
 | Integration | API and worker flows end to end, every test card, authentication expiry, revocation, CSRF, throttling, tenant isolation |
 | Contract | API responses validated against the OpenAPI document; every route documented |
-| Concurrency | Two captures at once produce one provider call; two workers never share a job; same-key creates produce one payment |
+| Concurrency | Two captures at once produce one provider call; two workers never claim the same job; same-key creates produce one payment |
 | Fault injection | Provider timeout before and after the effect, lost response, provider unavailable, retry exhaustion |
 | Crash recovery | Provider succeeds and the application stops before saving: recovered exactly once; a stale lease owner can't overwrite the new owner |
 | Frontend | Session, list paging, details polling and pending-action rules (Vitest) |
@@ -463,7 +495,20 @@ docker compose run --rm -p 5173:5173 dev sh -c \
 
 </details>
 
-## Path to production
+## Production considerations
+
+### Known limitations
+
+| Limitation | Effect | Resolved by |
+|---|---|---|
+| Plain HTTP (`COOKIE_SECURE=false`) | Local use only; the API refuses `NODE_ENV=production` without secure cookies | TLS (see the table below) |
+| Shared per-IP login limit behind nginx (`TRUST_PROXY=false`) | All browser users count against one limit of 50 failures per 15 minutes; the per-email limit still applies | Trusted proxy configuration |
+| Simulated provider | No real money movement | A real provider adapter |
+| No resume tool for paused work | Resolving `needs_review` needs a manual decision | Operator tooling |
+| Development seeds and secrets in `.env.example` | Not for any shared environment | A secrets manager |
+| Dashboard bundle just over 500 kB (MUI) | Vite build warning | Route-level code splitting |
+
+### What to ship
 
 Before shipping, in this order: TLS and secrets management, a real provider verified against the assumptions above, a managed database with tested backups, and CI with alerting. The full list, with what runs today and what to choose instead ([details](design_doc.md#14-production-readiness)):
 
@@ -484,9 +529,9 @@ Before shipping, in this order: TLS and secrets management, a real provider veri
 | Capacity | Not load-tested | Load tests (for example k6) of listing, job claiming and connection pools |
 | Operations | Paused work listed by SQL | Runbooks and a guarded resume tool; on-call ownership |
 
-## If more time were available
+## Areas for future improvement
 
-In priority order:
+What I would do with more time, in priority order:
 
 1. **CI pipeline** running the checks, both test suites and the image build on every change, so nothing merges unverified.
 2. **A guarded resume tool for paused work,** so dead-lettered payments can be resolved without hand-written SQL.
@@ -499,6 +544,7 @@ In priority order:
 
 | Document | Contents |
 |---|---|
+| [`Payment_Processing_Platform_Documentation.pdf`](Payment_Processing_Platform_Documentation.pdf) | The submission documentation in one PDF: requirements coverage, setup, architecture with diagrams, testing, tradeoffs, assumptions, production considerations, future improvements and screenshots |
 | [`design_doc.md`](design_doc.md) | Architecture, decisions and tradeoffs, failure handling, security, scalability, testing strategy, assumptions, production readiness; [§1.2](design_doc.md#12-requirements-coverage) maps every requirement of the brief |
 | [`project_spec.md`](project_spec.md) | Contracts: data flows, state machines, API, database schema, provider, metrics and log events, configuration, dashboard behaviour, deployment |
 | [`Software_Engineer-Technical_Exercise-Payment_Processing_Platform.md`](Software_Engineer-Technical_Exercise-Payment_Processing_Platform.md) | The original brief |
