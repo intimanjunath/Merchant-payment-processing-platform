@@ -34,6 +34,7 @@ describe('loadConfig', () => {
       allowedOrigins: ['http://localhost:5173'],
       loginThrottle: { windowSeconds: 900, maxPerEmail: 5, maxPerIp: 50 },
       providerTimeoutMs: 5_000,
+      workerPollIntervalMs: 5_000,
       jobs: { leaseSeconds: 30, maxRetries: 3, retryBaseMs: 2_000, reviewDeadlineSeconds: 1_800 },
       jwt: { issuer: 'payment-platform', audience: 'payment-platform-api' },
     });

@@ -1,4 +1,5 @@
 import {
+  formatTraceparent,
   type HttpMetrics,
   type Logger,
   parseTraceparent,
@@ -18,6 +19,7 @@ interface RequestLocals {
   requestId: string;
   traceId: string;
   spanId: string;
+  traceFlags: string;
 }
 
 // Probes and scrapes arrive every few seconds; logging them at info would bury real traffic.
@@ -37,6 +39,7 @@ export function trackRequests(logger: Logger, metrics: HttpMetrics): RequestHand
       requestId: resolveRequestId(req.headers[REQUEST_ID_HEADER]),
       traceId: span.traceId,
       spanId: span.spanId,
+      traceFlags: span.flags,
     };
     Object.assign(res.locals, locals);
     res.setHeader('X-Request-Id', locals.requestId);
@@ -51,7 +54,9 @@ export function trackRequests(logger: Logger, metrics: HttpMetrics): RequestHand
       // Logged with explicit IDs: 'finish' fires outside the request's async context.
       const fields = {
         event: 'http.request.completed',
-        ...locals,
+        requestId: locals.requestId,
+        traceId: locals.traceId,
+        spanId: locals.spanId,
         method: req.method,
         route,
         status: res.statusCode,
@@ -91,6 +96,16 @@ export const handleBodyParserErrors: ErrorRequestHandler = (error: unknown, _req
 export function requestIdOf(res: Response): string {
   const { requestId } = res.locals as Partial<RequestLocals>;
   return requestId ?? 'unknown';
+}
+
+/**
+ * This request's span as a traceparent, stored on the work it creates so the
+ * worker's later spans link back to it.
+ */
+export function traceparentOf(res: Response): string | null {
+  const { traceId, spanId, traceFlags } = res.locals as Partial<RequestLocals>;
+  if (!traceId || !spanId || !traceFlags) return null;
+  return formatTraceparent({ traceId, spanId, flags: traceFlags });
 }
 
 function routeTemplate(req: Request): string {

@@ -23,7 +23,12 @@ export interface TestApiOptions {
   applicationName?: string;
   /** LOGIN_THROTTLE_* overrides; the defaults match production (15 min, 5 per email, 50 per IP). */
   throttle?: { windowSeconds?: number; maxPerEmail?: number; maxPerIp?: number };
+  /** Connections in the app's pool; 2 by default, which the readiness tests rely on. */
+  poolMax?: number;
 }
+
+/** Short enough that pm_timeout and pm_lost_response tests stay quick. */
+const TEST_PROVIDER_TIMEOUT_MS = 200;
 
 const TEST_SECRET = 'test-only-secret-0123456789abcdef';
 
@@ -81,6 +86,7 @@ export async function startTestApi(options: TestApiOptions = {}): Promise<TestAp
     LOGIN_THROTTLE_WINDOW_SECONDS: options.throttle?.windowSeconds?.toString(),
     LOGIN_THROTTLE_MAX_PER_EMAIL: options.throttle?.maxPerEmail?.toString(),
     LOGIN_THROTTLE_MAX_PER_IP: options.throttle?.maxPerIp?.toString(),
+    PROVIDER_TIMEOUT_MS: String(TEST_PROVIDER_TIMEOUT_MS),
   });
   const logs: Record<string, unknown>[] = [];
   const destination = new Writable({
@@ -92,7 +98,7 @@ export async function startTestApi(options: TestApiOptions = {}): Promise<TestAp
   const logger = createLogger({ service: 'api', level: 'debug', destination });
   const pool = createPool(databaseUrl, {
     applicationName: options.applicationName ?? 'api-test',
-    max: 2,
+    max: options.poolMax ?? 2,
     onIdleClientError: () => undefined,
   });
   const metrics = createMetricsRegistry('api');

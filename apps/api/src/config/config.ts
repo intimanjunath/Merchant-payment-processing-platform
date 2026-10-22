@@ -15,6 +15,8 @@ export interface ApiConfig {
   loginThrottle: { windowSeconds: number; maxPerEmail: number; maxPerIp: number };
   providerTimeoutMs: number;
   settlementDelayMs: number;
+  /** Delay of the first recovery after a timeout and of the first settlement check. */
+  workerPollIntervalMs: number;
   jobs: {
     leaseSeconds: number;
     maxRetries: number;
@@ -67,6 +69,7 @@ export function loadConfig(env: Env = process.env): ApiConfig {
     },
     providerTimeoutMs: read.integer('PROVIDER_TIMEOUT_MS', { fallback: 5_000, min: 1 }),
     settlementDelayMs: read.integer('SETTLEMENT_DELAY_MS', { fallback: 10_000, min: 0 }),
+    workerPollIntervalMs: read.integer('WORKER_POLL_INTERVAL_MS', { fallback: 5_000, min: 1 }),
     jobs: {
       leaseSeconds: read.integer('JOB_LEASE_SECONDS', { fallback: 30, min: 1 }),
       maxRetries: read.integer('JOB_MAX_RETRIES', { fallback: 3, min: 0 }),

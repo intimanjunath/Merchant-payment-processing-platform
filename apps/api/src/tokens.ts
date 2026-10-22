@@ -4,3 +4,4 @@ export const LOGGER = Symbol('LOGGER');
 export const DB_POOL = Symbol('DB_POOL');
 export const METRICS = Symbol('METRICS');
 export const READINESS_TIMEOUT_MS = Symbol('READINESS_TIMEOUT_MS');
+export const PAYMENT_DEPS = Symbol('PAYMENT_DEPS');

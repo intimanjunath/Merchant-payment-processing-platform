@@ -1,8 +1,6 @@
 import {
   Body,
   Controller,
-  createParamDecorator,
-  type ExecutionContext,
   Get,
   Header,
   HttpCode,
@@ -16,10 +14,11 @@ import type { CookieOptions, Request, Response } from 'express';
 
 import type { ApiConfig } from '../config/config';
 import { CONFIG } from '../tokens';
-import { type AuthContext, type AuthenticatedRequest, SESSION_COOKIE } from './auth-context';
+import { type AuthContext, SESSION_COOKIE } from './auth-context';
 import { AuthGuard } from './auth.guard';
 import { AuthService } from './auth.service';
 import { csrfTokenFor } from './csrf';
+import { CurrentAuth } from './current-auth';
 import { LoginOriginGuard } from './login-origin.guard';
 import { LoginDto } from './login.dto';
 
@@ -27,11 +26,6 @@ import { LoginDto } from './login.dto';
 function clientIp(req: Request): string {
   return req.ip ?? req.socket.remoteAddress ?? 'unknown';
 }
-
-const CurrentAuth = createParamDecorator(
-  (_data: unknown, context: ExecutionContext): AuthContext =>
-    context.switchToHttp().getRequest<AuthenticatedRequest>().auth,
-);
 
 @Controller('auth')
 export class AuthController {

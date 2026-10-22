@@ -10,6 +10,8 @@
   "exclude": ["src/**/*.test.ts"],
   "references": [
     { "path": "../../packages/db/tsconfig.build.json" },
-    { "path": "../../packages/observability/tsconfig.build.json" }
+    { "path": "../../packages/observability/tsconfig.build.json" },
+    { "path": "../../packages/payments/tsconfig.build.json" },
+    { "path": "../../packages/provider/tsconfig.build.json" }
   ]
 }
