@@ -771,6 +771,8 @@ CREATE TABLE provider.injected_faults (
 
 No transaction holds a lock while calling the provider.
 
+**Reservation values.** TX1 writes the operation with `provider_key = 'pk_' || <random UUID>` and `expected_version` set to the payment's current version (0 for a create). Its recovery job is inserted `running`, already leased: `lease_owner` is the reserving process, `lease_expires_at = now() + JOB_LEASE_SECONDS`, `lease_generation = 1`, `attempts = 0` (the claim query counts recovery attempts), `due_at = now()`, `review_deadline = now() + REVIEW_DEADLINE_SECONDS`, and the request's ID and `traceparent`. The creation audit row has reason `create_accepted`; transition rows use the confirming event (`authorization_confirmed`, `authorization_failed`, `capture_confirmed`, `settlement_confirmed`, `refund_confirmed`). An unknown payment-method token is refused before TX1 (400 `VALIDATION_ERROR`), and a payment ID that is not a UUID is treated as not found (404), like another merchant's payment. A valid ID is lowercased before the idempotency scope (`capture:<id>`, `refund:<id>`) and request hash are built, because PostgreSQL reads every spelling of a UUID as the same value. `operation.reserved` is logged after TX1 commits.
+
 **Claim due jobs.** A worker claims only as many jobs as it has free processing slots (`WORKER_CONCURRENCY`, default 1), so a claimed job never waits in a local queue while its lease runs down:
 
 ```sql
