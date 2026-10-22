@@ -1,4 +1,4 @@
-/** Error codes from the spec's error table (design doc §4). */
+/** Error codes from the spec's error table (design doc §4.3). */
 export type ErrorCode =
   | 'VALIDATION_ERROR'
   | 'INVALID_CREDENTIALS'

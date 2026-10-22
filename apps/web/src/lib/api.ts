@@ -1,4 +1,4 @@
-/** The API's error codes (design doc §4), plus NETWORK_ERROR when no answer came back. */
+/** The API's error codes (design doc §4.3), plus NETWORK_ERROR when no answer came back. */
 export type ErrorCode =
   | 'VALIDATION_ERROR'
   | 'INVALID_CREDENTIALS'

@@ -639,7 +639,7 @@ describe('operation recovery', () => {
 
   describe('crash after the provider effect, before the local commit', () => {
     it('recovers exactly once when the worker runs: one effect, one finalization, one audit row per transition', async () => {
-      // Core crash test (plan step 13): reserve and call the provider, then "crash" before finalizing.
+      // Core crash test (design §6.1): reserve and call the provider, then "crash" before finalizing.
       const ctx = context();
       const input = order('pm_card_visa');
       const reservation = await reserveCreate(api, ctx, input);

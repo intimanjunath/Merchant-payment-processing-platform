@@ -21,7 +21,7 @@ import { createScratchDatabase } from '../helpers/test-db';
 const LEASE_SECONDS = 1;
 
 /**
- * Core recovery test (plan step 12, design §6): the API (owner A) is mid-call
+ * Core recovery test (design §6.1): the API (owner A) is mid-call
  * when its lease expires; a worker (owner B) claims the job, looks the outcome
  * up and finalizes. A's late answer must change nothing, whether it arrives
  * after B finalized or between B's claim and B's finalization.

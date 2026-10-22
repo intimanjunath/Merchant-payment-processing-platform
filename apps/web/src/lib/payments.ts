@@ -208,7 +208,7 @@ export function reachedAt(transitions: Transition[]): Partial<Record<PaymentStat
   return reached;
 }
 
-/** The API's amount range in cents (design §10): $0.01 to $1,000,000.00. */
+/** The API's amount range in cents (design §3): $0.01 to $1,000,000.00. */
 export const AMOUNT_MIN_CENTS = 1;
 export const AMOUNT_MAX_CENTS = 100_000_000;
 
