@@ -33,8 +33,25 @@ export class PaymentNotFoundError extends PaymentError {
   }
 }
 
-export class UnknownPaymentMethodError extends PaymentError {
+/** Bad input the payments package can only judge itself, reported against one field. */
+export class InvalidInputError extends PaymentError {
+  constructor(
+    readonly field: string,
+    message: string,
+  ) {
+    super('VALIDATION_ERROR', message);
+  }
+}
+
+export class UnknownPaymentMethodError extends InvalidInputError {
   constructor() {
-    super('VALIDATION_ERROR', 'The payment method is not recognized.');
+    super('paymentMethod', 'is not a recognized payment method');
+  }
+}
+
+/** Tampered, malformed, or issued for another merchant or other filters. */
+export class InvalidCursorError extends InvalidInputError {
+  constructor() {
+    super('cursor', 'is not valid for this query');
   }
 }

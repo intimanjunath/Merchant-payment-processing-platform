@@ -18,6 +18,8 @@ export type {
 } from './transitions';
 export {
   IdempotencyConflictError,
+  InvalidCursorError,
+  InvalidInputError,
   OperationInProgressError,
   PaymentError,
   PaymentNotFoundError,
@@ -42,3 +44,7 @@ export { mutationResponse, toOperationResource, toPaymentResource } from './reso
 export type { MutationResponse } from './resources';
 export { getPaymentDetails, toTransitionResource } from './details';
 export { canonicalPaymentId } from './ids';
+export { decodeCursor, encodeCursor } from './cursor';
+export type { CursorPosition, ListFilters } from './cursor';
+export { listPaymentsPage } from './list';
+export type { ListQuery } from './list';
