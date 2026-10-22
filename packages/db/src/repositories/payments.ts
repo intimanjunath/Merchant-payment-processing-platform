@@ -470,3 +470,49 @@ export async function requeueJob(
     [job.jobId, job.dueInMs, job.lastError],
   );
 }
+
+// Reads for the payment details view.
+
+export interface TransitionRecord {
+  fromState: string | null;
+  toState: string;
+  actor: string;
+  source: 'api' | 'worker';
+  reason: string;
+  requestId: string;
+  occurredAt: Date;
+}
+
+export async function findPaymentForMerchant(
+  db: Db,
+  paymentId: string,
+  merchantId: string,
+): Promise<PaymentRecord | undefined> {
+  const result = await db.query<PaymentRecord>(
+    `SELECT ${PAYMENT_COLUMNS} FROM payments WHERE id = $1 AND merchant_id = $2`,
+    [paymentId, merchantId],
+  );
+  return result.rows[0];
+}
+
+/** Every operation on the payment, oldest first, including rejected and paused ones. */
+export async function listOperations(db: Db, paymentId: string): Promise<OperationRecord[]> {
+  const result = await db.query<OperationRecord>(
+    `SELECT ${OPERATION_COLUMNS} FROM operations WHERE payment_id = $1 ORDER BY created_at, id`,
+    [paymentId],
+  );
+  return result.rows;
+}
+
+/** The audit trail, oldest first. */
+export async function listTransitions(db: Db, paymentId: string): Promise<TransitionRecord[]> {
+  const result = await db.query<TransitionRecord>(
+    `SELECT from_state AS "fromState", to_state AS "toState", actor, source, reason,
+            request_id AS "requestId", occurred_at AS "occurredAt"
+       FROM audit_events
+      WHERE payment_id = $1
+      ORDER BY occurred_at, id`,
+    [paymentId],
+  );
+  return result.rows;
+}

@@ -35,6 +35,7 @@ export {
   findOperation,
   findOperationByKey,
   findPayment,
+  findPaymentForMerchant,
   findUnresolvedOperation,
   insertAuditEvent,
   insertLeasedRecoveryJob,
@@ -42,6 +43,8 @@ export {
   insertPayment,
   insertSettlementJob,
   isUniqueViolation,
+  listOperations,
+  listTransitions,
   lockOperation,
   lockOwnedJob,
   lockPayment,
@@ -58,6 +61,8 @@ export type {
   OperationRecord,
   OperationStatus,
   PaymentRecord,
+  TransitionRecord,
 } from './repositories/payments';
+export { isDatabaseUnavailable } from './errors';
 export { seed } from './seed';
 export { withTransaction } from './transaction';
