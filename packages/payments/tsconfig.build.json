@@ -5,5 +5,10 @@
     "outDir": "dist"
   },
   "include": ["src"],
-  "exclude": ["src/**/*.test.ts"]
+  "exclude": ["src/**/*.test.ts"],
+  "references": [
+    { "path": "../../packages/db/tsconfig.build.json" },
+    { "path": "../../packages/observability/tsconfig.build.json" },
+    { "path": "../../packages/provider/tsconfig.build.json" }
+  ]
 }
