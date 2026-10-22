@@ -1,10 +1,16 @@
 import { hostname } from 'node:os';
 
 import { createPool, DEFAULT_READINESS_TIMEOUT_MS } from '@payments/db';
-import { createLogger, createMetricsRegistry, runOutsideContext } from '@payments/observability';
+import {
+  createLogger,
+  createMetricsRegistry,
+  createPaymentMetrics,
+  runOutsideContext,
+} from '@payments/observability';
 import { createFakeProvider } from '@payments/provider';
 
 import { ConfigError, loadWorkerConfig } from './config';
+import { registerStateCollector } from './collector';
 import { recoveryHandler } from './handlers/recovery';
 import { settlementHandler } from './handlers/settlement';
 import { createHealthServer } from './health';
@@ -41,6 +47,8 @@ function main(): void {
     },
   });
   const metrics = createMetricsRegistry('worker');
+  const paymentMetrics = createPaymentMetrics(metrics);
+  registerStateCollector(metrics, pool, logger);
   const provider = createFakeProvider(pool, {
     timeoutMs: config.providerTimeoutMs,
     settlementDelayMs: config.settlementDelayMs,
@@ -66,6 +74,7 @@ function main(): void {
         retryBaseMs: config.jobs.retryBaseMs,
         reviewDeadlineSeconds: config.jobs.reviewDeadlineSeconds,
         settlementPollMs: config.pollIntervalMs,
+        metrics: paymentMetrics,
       }),
       settlement: settlementHandler({
         pool,
@@ -75,6 +84,7 @@ function main(): void {
         pollIntervalMs: config.pollIntervalMs,
         maxRetries: config.jobs.maxRetries,
         retryBaseMs: config.jobs.retryBaseMs,
+        metrics: paymentMetrics,
       }),
     },
   });

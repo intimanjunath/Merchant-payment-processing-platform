@@ -56,6 +56,7 @@ export {
   lockPaymentForMerchant,
   markAwaitingConfirmation,
   markNeedsReview,
+  readStateSnapshot,
   pauseJob,
   renewLease,
   requeueJob,
@@ -72,6 +73,7 @@ export type {
   OperationRecord,
   OperationStatus,
   PaymentRecord,
+  StateSnapshot,
   TransitionRecord,
 } from './repositories/payments';
 export { isDatabaseUnavailable } from './errors';

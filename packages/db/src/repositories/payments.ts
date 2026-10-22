@@ -663,3 +663,49 @@ export async function flagSettlementReview(db: Db, paymentId: string): Promise<v
     paymentId,
   ]);
 }
+
+// The worker's metrics collector (spec §7.2): database-wide state in one query per scrape.
+
+export interface StateSnapshot {
+  paymentsByState: Record<string, number>;
+  jobsDue: Record<string, number>;
+  /** Seconds since the oldest due job became due (or its lease expired), by type. */
+  jobsLagSeconds: Record<string, number>;
+  jobsPaused: Record<string, number>;
+  /** Age of the oldest reserved, awaiting or paused operation; 0 when there is none. */
+  oldestUnresolvedSeconds: number;
+}
+
+export async function readStateSnapshot(db: Db): Promise<StateSnapshot> {
+  const result = await db.query<{
+    by_state: Record<string, number> | null;
+    due: Record<string, number> | null;
+    lag: Record<string, number> | null;
+    paused: Record<string, number> | null;
+    oldest: number | null;
+  }>(
+    `WITH due AS (
+       SELECT type, CASE WHEN status = 'queued' THEN due_at ELSE lease_expires_at END AS since
+         FROM jobs
+        WHERE (status = 'queued' AND due_at <= now())
+           OR (status = 'running' AND lease_expires_at <= now())
+     )
+     SELECT
+       (SELECT json_object_agg(state, n) FROM (SELECT state, count(*)::int AS n FROM payments GROUP BY state) s) AS by_state,
+       (SELECT json_object_agg(type, n) FROM (SELECT type, count(*)::int AS n FROM due GROUP BY type) d) AS due,
+       (SELECT json_object_agg(type, s)
+          FROM (SELECT type, extract(epoch FROM now() - min(since))::float8 AS s FROM due GROUP BY type) l) AS lag,
+       (SELECT json_object_agg(type, n)
+          FROM (SELECT type, count(*)::int AS n FROM jobs WHERE status = 'paused' GROUP BY type) p) AS paused,
+       (SELECT extract(epoch FROM now() - min(created_at))::float8
+          FROM operations WHERE status IN ('reserved', 'awaiting_confirmation', 'needs_review')) AS oldest`,
+  );
+  const row = result.rows[0];
+  return {
+    paymentsByState: row?.by_state ?? {},
+    jobsDue: row?.due ?? {},
+    jobsLagSeconds: row?.lag ?? {},
+    jobsPaused: row?.paused ?? {},
+    oldestUnresolvedSeconds: row?.oldest ?? 0,
+  };
+}
