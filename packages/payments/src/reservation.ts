@@ -30,8 +30,7 @@ import {
   assertActionAllowed,
   INITIAL_STATE,
   type PaymentAction,
-  PAYMENT_STATES,
-  type PaymentState,
+  parsePaymentState,
 } from './transitions';
 
 export interface ReservationDeps {
@@ -170,7 +169,7 @@ export async function reserveAction(
     const unresolved = await findUnresolvedOperation(client, payment.id);
     if (unresolved) throw new OperationInProgressError(unresolved.id);
 
-    assertActionAllowed(paymentState(payment), input.action);
+    assertActionAllowed(parsePaymentState(payment.state), input.action);
 
     const { operation, job } = await insertOperationAndJob(deps, client, context, {
       payment,
@@ -260,10 +259,4 @@ function logCommitted(deps: ReservationDeps, reservation: Reservation): Reservat
     );
   }
   return reservation;
-}
-
-function paymentState(payment: PaymentRecord): PaymentState {
-  const state = PAYMENT_STATES.find((known) => known === payment.state);
-  if (!state) throw new Error(`Unknown payment state: ${payment.state}`);
-  return state;
 }

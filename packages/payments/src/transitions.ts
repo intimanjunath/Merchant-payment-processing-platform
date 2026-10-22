@@ -75,6 +75,13 @@ export function transition(state: PaymentState, event: PaymentEvent): Transition
   return { ...rule };
 }
 
+/** Reads a stored state; anything outside the table is a bug, not a refusal. */
+export function parsePaymentState(value: string): PaymentState {
+  const state = PAYMENT_STATES.find((known) => known === value);
+  if (!state) throw new Error(`Unknown payment state: ${value}`);
+  return state;
+}
+
 /** The state an action must start from: capture needs authorized, refund needs settled. */
 export function requiredState(action: PaymentAction): PaymentState {
   return TRANSITIONS[CONFIRMED_BY[action]].from;
