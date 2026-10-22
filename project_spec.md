@@ -907,6 +907,11 @@ Behavior rules:
 - A timeout waits `PROVIDER_TIMEOUT_MS` before throwing, so client timing is realistic. Tests set a short value.
 - `getSettlement` returns `available` once `now() >= funds_available_at`.
 - Before applying a call, the fake consumes the oldest matching unconsumed row in `provider.injected_faults`, if any. Only integration tests write that table.
+- Faults apply only to `authorize`, `capture` and `refund` calls of the matching `kind` (a row with no `charge_id` matches any charge; authorize has no charge yet, so only those match), never to `lookup` or `getSettlement`. A call whose key already has a stored outcome returns it without consuming a fault. `timeout_before_effect` stores nothing and times out; `lost_response` stores the effect, then times out; `reject` stores `rejected` with code `rejected_by_provider`.
+- Capture and refund lock the charge row, so of several calls with different keys on one charge only one takes effect; the others are rejected. Both are for the full authorized amount.
+- Rejection codes: `card_declined` and `unknown_payment_method` (authorize, stored as `declined`), `authorization_not_received`, `charge_not_found`, `charge_not_capturable`, `charge_not_refundable`, `amount_mismatch`, `rejected_by_provider`.
+- A failure of the fake's own storage, including `getSettlement` for an unknown charge, throws `ProviderUnavailableError`.
+- The fake's SQL lives in `packages/db` (`repositories/provider.ts`); `packages/provider` holds the contract, the test tokens and the fake's decisions.
 
 ## 7. Observability
 
