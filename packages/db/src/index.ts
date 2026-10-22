@@ -30,5 +30,23 @@ export type {
   ProviderRequestRow,
   StoredOutcome,
 } from './repositories/provider';
+export {
+  findOperationByKey,
+  findPayment,
+  findUnresolvedOperation,
+  insertAuditEvent,
+  insertLeasedRecoveryJob,
+  insertOperation,
+  insertPayment,
+  isUniqueViolation,
+  lockPaymentForMerchant,
+} from './repositories/payments';
+export type {
+  JobRecord,
+  OperationAction,
+  OperationRecord,
+  OperationStatus,
+  PaymentRecord,
+} from './repositories/payments';
 export { seed } from './seed';
 export { withTransaction } from './transaction';
