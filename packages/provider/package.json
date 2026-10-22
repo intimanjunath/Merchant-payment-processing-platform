@@ -1,0 +1,18 @@
+{
+  "name": "@payments/provider",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Payment provider contract and a durable fake provider for development and tests.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "dependencies": {
+    "@payments/db": "0.0.0",
+    "pg": "8.23.1"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1"
+  }
+}
