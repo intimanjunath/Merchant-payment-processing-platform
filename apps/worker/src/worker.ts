@@ -80,10 +80,11 @@ export class Worker {
     this.running = false;
     this.wake?.();
     await this.loop;
-    const drained = await Promise.race([
+    const drained = await raceTimer(
       Promise.allSettled([...this.inFlight]).then(() => true),
-      sleep(graceMs).then(() => false),
-    ]);
+      graceMs,
+      false,
+    );
     this.options.logger.info(
       { event: 'worker.stopped', drained, unfinished: this.inFlight.size },
       drained
@@ -131,7 +132,11 @@ export class Worker {
     const stopped = new Promise<void>((resolve) => {
       this.wake = resolve;
     });
-    await Promise.race([sleep(this.options.pollIntervalMs), stopped, ...this.inFlight]);
+    await raceTimer(
+      Promise.race([stopped, ...this.inFlight]),
+      this.options.pollIntervalMs,
+      undefined,
+    );
     this.wake = undefined;
   }
 
@@ -181,5 +186,22 @@ export class Worker {
         );
       }
     });
+  }
+}
+
+/**
+ * The first of `work` and a timer of `ms`. The timer is cancelled when work
+ * wins, so a finished stop() or pause() leaves nothing keeping the process
+ * alive (otherwise shutdown would wait out the whole grace or poll period).
+ */
+async function raceTimer<T, F>(work: Promise<T>, ms: number, onTimeout: F): Promise<T | F> {
+  const timer = new AbortController();
+  try {
+    return await Promise.race([
+      work,
+      sleep(ms, onTimeout, { signal: timer.signal }).catch(() => onTimeout),
+    ]);
+  } finally {
+    timer.abort();
   }
 }

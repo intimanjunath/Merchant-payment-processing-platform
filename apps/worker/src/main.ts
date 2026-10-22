@@ -6,6 +6,7 @@ import { createFakeProvider } from '@payments/provider';
 
 import { ConfigError, loadWorkerConfig } from './config';
 import { recoveryHandler } from './handlers/recovery';
+import { settlementHandler } from './handlers/settlement';
 import { createHealthServer } from './health';
 import { Heartbeat } from './heartbeat';
 import { Worker } from './worker';
@@ -54,7 +55,6 @@ function main(): void {
     pollIntervalMs: Math.min(config.pollIntervalMs, config.heartbeatIntervalMs),
     leaseSeconds: config.jobs.leaseSeconds,
     heartbeat,
-    // The settlement handler (step 14) is registered here too.
     handlers: {
       operation_recovery: recoveryHandler({
         pool,
@@ -66,6 +66,15 @@ function main(): void {
         retryBaseMs: config.jobs.retryBaseMs,
         reviewDeadlineSeconds: config.jobs.reviewDeadlineSeconds,
         settlementPollMs: config.pollIntervalMs,
+      }),
+      settlement: settlementHandler({
+        pool,
+        logger,
+        provider,
+        leaseSeconds: config.jobs.leaseSeconds,
+        pollIntervalMs: config.pollIntervalMs,
+        maxRetries: config.jobs.maxRetries,
+        retryBaseMs: config.jobs.retryBaseMs,
       }),
     },
   });
