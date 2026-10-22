@@ -425,7 +425,7 @@ Origin check (cookie-authenticated mutations, `/auth/login`, `/auth/token`): the
 }
 ```
 
-`details` is optional. It carries field errors for 400 and `{ paymentId, operationId, code }` for 422. Codes and statuses are listed in design doc §4.
+`details` is optional. It carries field errors for 400 as `fields: [{ field, issue }]` (the issue names the rule, never the value sent; an unknown field such as `cardNumber` reads `is not an accepted field`, and a bad `Idempotency-Key` is reported as that field), `{ state }` for 409 `INVALID_STATE_TRANSITION`, and `{ paymentId, operationId, code }` for 422. Every error response sends `Cache-Control: no-store`. A database that cannot be reached (connection refused or dropped, pool connect timeout, SQLSTATE class 08 or 57P01–57P03) answers 503 `SERVICE_UNAVAILABLE`. Codes and statuses are listed in design doc §4.
 
 ### 4.3 Authentication endpoints
 
@@ -479,7 +479,7 @@ Request hash input: `{ amount, reference (trimmed), paymentMethod }`, serialized
 
 **`POST /payments/{id}/capture`** and **`POST /payments/{id}/refund`**
 
-Body is empty or `{}`. Request hash input: `{ action, paymentId }`.
+Body is empty or `{}`; any field is a 400. Request hash input: `{ action, paymentId }`.
 
 | Outcome | Status | Body |
 |---|---|---|
@@ -522,8 +522,9 @@ Order: `created_at DESC, id DESC`. `nextCursor` is `null` on the last page. A cu
 | `GET /health` | Worker | Poll loop heartbeat within 30 s | `{ "status": "ok", "lastHeartbeatAt": "..." }`; 503 when stale |
 | `GET /ready` | Worker | Database reachable, migrations applied, not shutting down | Same shape as the API |
 | `GET /metrics` | Both | Always | Prometheus text format |
+| `GET /openapi.json` | API | Always | The OpenAPI 3.1 description of every API route |
 
-Health and metrics routes need no authentication. In production they would be reachable only from the internal network.
+Health, metrics and OpenAPI routes need no authentication. In production they would be reachable only from the internal network.
 
 Each readiness phase (getting a connection, running the checks) is bounded, 2 s by default. The checks run on one connection inside a read-only transaction with `SET LOCAL statement_timeout`, so PostgreSQL itself cancels a blocked query. A connection that arrives after the limit is released at once, and a connection whose server stops answering is destroyed. Repeated probes during an outage therefore cannot exhaust the pool or delay shutdown.
 

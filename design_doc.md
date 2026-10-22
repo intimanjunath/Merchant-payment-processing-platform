@@ -173,7 +173,7 @@ Every payment, operation and audit query uses merchant identity from the verifie
 
 **Why create and capture/refund differ on rejection.** Create returns 201 whenever the provider gives a definitive answer, including a decline: a payment resource now exists, in state Failed, with the decline reason. Capture and refund act on an existing payment, so a provider rejection returns 422 `PROVIDER_REJECTED` and the payment keeps its state. Replays return the original status.
 
-List responses use `{ items, nextCursor }`, ordered by `(created_at DESC, id DESC)`. Default limit 25, maximum 100; validate cursors and bind them to merchant/filter values. Use UTC timestamps and include currency in money responses. Keep OpenAPI aligned with the code.
+List responses use `{ items, nextCursor }`, ordered by `(created_at DESC, id DESC)`. Default limit 25, maximum 100; validate cursors and bind them to merchant/filter values. Use UTC timestamps and include currency in money responses. Keep OpenAPI aligned with the code: the API serves a hand-written OpenAPI 3.1 document at `GET /openapi.json`, and tests fail if a route is undocumented (or documented but missing) or if a response does not match its schema.
 
 Errors use `{ "error": { "code": "...", "message": "...", "requestId": "..." } }`, with an optional `details` object for field errors and provider rejections:
 
