@@ -2,8 +2,10 @@ import { hostname } from 'node:os';
 
 import { createPool, DEFAULT_READINESS_TIMEOUT_MS } from '@payments/db';
 import { createLogger, createMetricsRegistry, runOutsideContext } from '@payments/observability';
+import { createFakeProvider } from '@payments/provider';
 
 import { ConfigError, loadWorkerConfig } from './config';
+import { recoveryHandler } from './handlers/recovery';
 import { createHealthServer } from './health';
 import { Heartbeat } from './heartbeat';
 import { Worker } from './worker';
@@ -38,6 +40,10 @@ function main(): void {
     },
   });
   const metrics = createMetricsRegistry('worker');
+  const provider = createFakeProvider(pool, {
+    timeoutMs: config.providerTimeoutMs,
+    settlementDelayMs: config.settlementDelayMs,
+  });
   const heartbeat = new Heartbeat(metrics, config.heartbeatIntervalMs);
   const worker = new Worker({
     pool,
@@ -48,8 +54,20 @@ function main(): void {
     pollIntervalMs: Math.min(config.pollIntervalMs, config.heartbeatIntervalMs),
     leaseSeconds: config.jobs.leaseSeconds,
     heartbeat,
-    // Recovery (step 13) and settlement (step 14) handlers are registered here.
-    handlers: {},
+    // The settlement handler (step 14) is registered here too.
+    handlers: {
+      operation_recovery: recoveryHandler({
+        pool,
+        logger,
+        provider,
+        source: 'worker',
+        leaseSeconds: config.jobs.leaseSeconds,
+        maxRetries: config.jobs.maxRetries,
+        retryBaseMs: config.jobs.retryBaseMs,
+        reviewDeadlineSeconds: config.jobs.reviewDeadlineSeconds,
+        settlementPollMs: config.pollIntervalMs,
+      }),
+    },
   });
 
   let shuttingDown = false;
