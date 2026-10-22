@@ -1,4 +1,5 @@
 import Box from '@mui/material/Box';
+import Link from '@mui/material/Link';
 import Skeleton from '@mui/material/Skeleton';
 import Table from '@mui/material/Table';
 import TableBody from '@mui/material/TableBody';
@@ -8,20 +9,43 @@ import TableRow from '@mui/material/TableRow';
 import Typography from '@mui/material/Typography';
 import useMediaQuery from '@mui/material/useMediaQuery';
 import { useTheme } from '@mui/material/styles';
+import { Link as RouterLink, useLocation } from 'react-router';
 
-import { formatAmount, formatCard, type Payment } from '../lib/payments';
+import {
+  formatAmount,
+  formatCard,
+  formatDateTime,
+  type FromList,
+  type Payment,
+} from '../lib/payments';
 import { tokens } from '../theme';
 import { PaymentStatus } from './PaymentStatus';
 
 const COLUMN_WIDTHS = ['28%', '24%', '12%', '17%', '19%'];
 
-const created = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
-
 // Amounts line up digit for digit; only here, since the feature widens punctuation in text.
 const figures = { fontVariantNumeric: 'tabular-nums' } as const;
 
+/** The reference, linking to the payment's page; the list's filters travel along for the way back. */
+function PaymentLink({ payment }: { payment: Payment }) {
+  const { search } = useLocation();
+  const state: FromList = { listSearch: search };
+  return (
+    <Link
+      component={RouterLink}
+      to={`/payments/${encodeURIComponent(payment.id)}`}
+      state={state}
+      underline="hover"
+      color="inherit"
+      sx={{ fontWeight: 560 }}
+    >
+      {payment.reference}
+    </Link>
+  );
+}
+
 function CreatedAt({ value }: { value: string }) {
-  return <time dateTime={value}>{created.format(new Date(value))}</time>;
+  return <time dateTime={value}>{formatDateTime(value)}</time>;
 }
 
 interface PaymentTableProps {
@@ -65,8 +89,8 @@ function WideTable({ payments, skeletonRows }: Required<PaymentTableProps>) {
       <TableBody>
         {payments.map((payment) => (
           <TableRow key={payment.id}>
-            <TableCell sx={{ ...cell, fontWeight: 560, overflowWrap: 'anywhere' }}>
-              {payment.reference}
+            <TableCell sx={{ ...cell, overflowWrap: 'anywhere' }}>
+              <PaymentLink payment={payment} />
             </TableCell>
             <TableCell sx={cell}>
               <PaymentStatus payment={payment} />
@@ -103,8 +127,8 @@ function NarrowList({ payments, skeletonRows }: Required<PaymentTableProps>) {
       {payments.map((payment) => (
         <Box component="li" key={payment.id} sx={row}>
           <Box sx={{ display: 'flex', gap: 2, alignItems: 'baseline' }}>
-            <Typography sx={{ fontWeight: 560, flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
-              {payment.reference}
+            <Typography sx={{ flex: 1, minWidth: 0, overflowWrap: 'anywhere' }}>
+              <PaymentLink payment={payment} />
             </Typography>
             <Typography sx={{ ...figures, fontWeight: 560 }}>
               {formatAmount(payment.amount, payment.currency)}

@@ -1,30 +1,49 @@
 import Box from '@mui/material/Box';
 import Typography from '@mui/material/Typography';
 
+import { formatDateTime, type PaymentState } from '../lib/payments';
 import { tokens } from '../theme';
 
 interface Stage {
+  key: PaymentState;
   state: string;
   meaning: string;
 }
 
+type Tone = 'path' | 'goal' | 'stop' | 'back' | 'ahead';
+
+/** One payment's place on the rail: its state now, and when it reached each one. */
+export interface RailProgress {
+  state: PaymentState;
+  reachedAt: Partial<Record<PaymentState, string>>;
+}
+
 // The path every payment can take (spec §3.1), in the merchant's words.
 const MAIN: Stage[] = [
-  { state: 'Pending', meaning: 'Sent to the card’s bank; waiting for its answer.' },
-  { state: 'Authorized', meaning: 'Approved. The amount is held on the card.' },
-  { state: 'Captured', meaning: 'You’ve claimed the money; it’s on its way.' },
-  { state: 'Settled', meaning: 'The money has reached your account.' },
+  { key: 'pending', state: 'Pending', meaning: 'Sent to the card’s bank; waiting for its answer.' },
+  { key: 'authorized', state: 'Authorized', meaning: 'Approved. The amount is held on the card.' },
+  { key: 'captured', state: 'Captured', meaning: 'You’ve claimed the money; it’s on its way.' },
+  { key: 'settled', state: 'Settled', meaning: 'The money has reached your account.' },
 ];
 const FAILED: Stage = {
+  key: 'failed',
   state: 'Failed',
   meaning: 'Declined, or the request never reached the bank.',
 };
-const REFUNDED: Stage = { state: 'Refunded', meaning: 'Returned to the customer.' };
+const REFUNDED: Stage = {
+  key: 'refunded',
+  state: 'Refunded',
+  meaning: 'Returned to the customer.',
+};
 
-function Marker({ tone }: { tone: 'path' | 'goal' | 'stop' | 'back' }) {
-  const color = { path: tokens.ink, goal: tokens.note, stop: tokens.alert, back: tokens.inkMuted }[
-    tone
-  ];
+function Marker({ tone, filled }: { tone: Tone; filled: boolean }) {
+  const color = {
+    path: tokens.ink,
+    goal: tokens.note,
+    stop: tokens.alert,
+    back: tokens.inkMuted,
+    ahead: tokens.rule,
+  }[tone];
   return (
     <Box
       aria-hidden
@@ -33,7 +52,7 @@ function Marker({ tone }: { tone: 'path' | 'goal' | 'stop' | 'back' }) {
         height: 14,
         borderRadius: '50%',
         border: `2px solid ${color}`,
-        bgcolor: tone === 'goal' ? color : tokens.surface,
+        bgcolor: filled ? color : tokens.surface,
         position: 'relative',
         zIndex: 1,
       }}
@@ -41,10 +60,19 @@ function Marker({ tone }: { tone: 'path' | 'goal' | 'stop' | 'back' }) {
   );
 }
 
-function Node({ stage, tone }: { stage: Stage; tone: 'path' | 'goal' | 'stop' | 'back' }) {
+interface Look {
+  tone: Tone;
+  filled: boolean;
+  /** Replaces the stage's meaning: when this payment reached it. */
+  note?: string;
+  current?: boolean;
+}
+
+function Node({ stage, look }: { stage: Stage; look: Look }) {
   return (
     <Box
       component="li"
+      aria-current={look.current ? 'step' : undefined}
       sx={{
         listStyle: 'none',
         display: 'grid',
@@ -57,7 +85,7 @@ function Node({ stage, tone }: { stage: Stage; tone: 'path' | 'goal' | 'stop' | 
       }}
     >
       <Box sx={{ gridRow: { xs: 'span 2', md: 'auto' }, pt: { xs: 0.5, md: 0 } }}>
-        <Marker tone={tone} />
+        <Marker tone={look.tone} filled={look.filled} />
       </Box>
       <Typography component="span" sx={{ fontWeight: 640, fontSize: '1.0625rem' }}>
         {stage.state}
@@ -68,7 +96,7 @@ function Node({ stage, tone }: { stage: Stage; tone: 'path' | 'goal' | 'stop' | 
         color="text.secondary"
         sx={{ maxWidth: '24ch', gridColumn: { xs: 2, md: 'auto' } }}
       >
-        {stage.meaning}
+        {look.note ?? stage.meaning}
       </Typography>
     </Box>
   );
@@ -79,12 +107,34 @@ function Node({ stage, tone }: { stage: Stage; tone: 'path' | 'goal' | 'stop' | 
  * ways off it (failing before authorization, refunding after settlement)
  * dropping below the stage they leave from. On narrow screens it runs top to
  * bottom instead.
+ *
+ * Without `progress` it explains the path (the sign-in page). With it, it
+ * shows one payment: stages it reached are filled and dated, the current one
+ * is marked as the current step, and the rest stay pale with their meaning.
  */
-export function LifecycleRail() {
+export function LifecycleRail({
+  caption = 'Every payment you take moves along this path.',
+  progress,
+}: {
+  caption?: string;
+  progress?: RailProgress;
+}) {
+  const look = (stage: Stage, explainer: Look): Look => {
+    if (!progress) return explainer;
+    const at = progress.reachedAt[stage.key];
+    const reached = at !== undefined || progress.state === stage.key;
+    if (!reached) return { tone: 'ahead', filled: false };
+    return {
+      tone: explainer.tone,
+      filled: true,
+      current: progress.state === stage.key,
+      ...(at !== undefined && { note: formatDateTime(at) }),
+    };
+  };
   return (
     <Box component="figure" sx={{ m: 0 }}>
       <Typography component="figcaption" variant="h4" sx={{ mb: 3.5, maxWidth: '30ch' }}>
-        Every payment you take moves along this path.
+        {caption}
       </Typography>
       <Box
         component="ol"
@@ -99,7 +149,8 @@ export function LifecycleRail() {
           '&::before': {
             content: '""',
             position: 'absolute',
-            bgcolor: tokens.ink,
+            // Pale under one payment's progress, so only its filled markers read as reached.
+            bgcolor: progress ? tokens.rule : tokens.ink,
             left: { xs: 6, md: 7 },
             top: { xs: 11, md: 6 },
             width: { xs: 2, md: 'calc(75% + 0.75rem)' },
@@ -109,9 +160,14 @@ export function LifecycleRail() {
       >
         {MAIN.map((stage, index) => (
           <Node
-            key={stage.state}
+            key={stage.key}
             stage={stage}
-            tone={index === MAIN.length - 1 ? 'goal' : 'path'}
+            look={look(
+              stage,
+              index === MAIN.length - 1
+                ? { tone: 'goal', filled: true }
+                : { tone: 'path', filled: false },
+            )}
           />
         ))}
       </Box>
@@ -141,8 +197,8 @@ export function LifecycleRail() {
           '& > li:nth-of-type(2)': { gridColumn: { md: 4 } },
         }}
       >
-        <Node stage={FAILED} tone="stop" />
-        <Node stage={REFUNDED} tone="back" />
+        <Node stage={FAILED} look={look(FAILED, { tone: 'stop', filled: false })} />
+        <Node stage={REFUNDED} look={look(REFUNDED, { tone: 'back', filled: false })} />
       </Box>
     </Box>
   );

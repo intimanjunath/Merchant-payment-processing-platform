@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  actorLabel,
   formatAmount,
   formatCard,
   isPaymentState,
+  isUnresolved,
   normalizeSearch,
   type Payment,
+  type PaymentDetails,
   paymentListPath,
+  reachedAt,
+  reasonLabel,
   stateNote,
 } from './payments';
 
@@ -82,5 +87,71 @@ describe('formatting', () => {
     expect(stateNote({ ...payment, state: 'captured', settlementReview: true })).toBe(
       'Settlement under review',
     );
+  });
+});
+
+describe('details helpers', () => {
+  const details = (
+    state: Payment['state'],
+    pending: PaymentDetails['pendingOperation'] = null,
+  ) => ({
+    payment: { ...payment, state },
+    pendingOperation: pending,
+    operations: [],
+    transitions: [],
+  });
+  const operation = (status: NonNullable<PaymentDetails['pendingOperation']>['status']) => ({
+    id: 'op',
+    action: 'capture' as const,
+    status,
+    reason: null,
+    createdAt: payment.createdAt,
+    completedAt: null,
+  });
+
+  it('counts pending, captured and unresolved operations as unresolved', () => {
+    expect(isUnresolved(details('pending'))).toBe(true);
+    expect(isUnresolved(details('captured'))).toBe(true);
+    expect(isUnresolved(details('authorized', operation('awaiting_confirmation')))).toBe(true);
+    expect(isUnresolved(details('authorized', operation('needs_review')))).toBe(true);
+    for (const state of ['authorized', 'settled', 'refunded', 'failed'] as const) {
+      expect(isUnresolved(details(state))).toBe(false);
+    }
+  });
+
+  it('records when each state was reached', () => {
+    expect(
+      reachedAt([
+        {
+          fromState: null,
+          toState: 'pending',
+          actor: 'merchant:m',
+          source: 'api',
+          reason: 'create_accepted',
+          requestId: 'r1',
+          occurredAt: 't1',
+        },
+        {
+          fromState: 'pending',
+          toState: 'authorized',
+          actor: 'merchant:m',
+          source: 'worker',
+          reason: 'authorization_confirmed',
+          requestId: 'r1',
+          occurredAt: 't2',
+        },
+      ]),
+    ).toEqual({ pending: 't1', authorized: 't2' });
+  });
+
+  it('names actors and reasons in the merchant’s words', () => {
+    expect(actorLabel({ actor: 'system:settlement', source: 'worker' })).toBe('Automatically');
+    expect(actorLabel({ actor: 'merchant:m', source: 'api' })).toBe('By you');
+    expect(actorLabel({ actor: 'merchant:m', source: 'worker' })).toBe(
+      'By you, confirmed later by the platform',
+    );
+    expect(reasonLabel('settlement_confirmed')).toBe('Funds reached your account');
+    expect(reasonLabel('something_new')).toBe('something_new');
+    expect(reasonLabel(null)).toBeNull();
   });
 });
