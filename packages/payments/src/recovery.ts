@@ -24,6 +24,7 @@ import {
   type WorkRef,
 } from './finalize';
 import { renewJobLease } from './jobs';
+import { countingFailures, countJobRun } from './metrics';
 import { callProvider, isProviderFailure, type ProviderFailure } from './provider-call';
 
 export interface RecoveryDeps extends FinalizeDeps {
@@ -63,6 +64,18 @@ export function retryDelayMs(
  * the lease is renewed before each provider call.
  */
 export async function recoverOperation(
+  deps: RecoveryDeps,
+  job: JobRecord,
+  run: { generation: number },
+): Promise<RecoveryOutcome> {
+  const outcome = await countingFailures(deps, 'operation_recovery', () =>
+    recoveryAttempt(deps, job, run),
+  );
+  countJobRun(deps, 'operation_recovery', outcome);
+  return outcome;
+}
+
+async function recoveryAttempt(
   deps: RecoveryDeps,
   job: JobRecord,
   run: { generation: number },
@@ -117,7 +130,7 @@ async function attemptRecovery(
   });
 
   if (!(await renewJobLease(deps.pool, work, deps.leaseSeconds))) return 'lease_lost';
-  const found = await callProvider(deps.logger, ids('lookup'), () =>
+  const found = await callProvider(deps, ids('lookup'), () =>
     deps.provider.lookup({ kind: operation.action, providerKey: operation.providerKey }),
   );
   // Confirmed, rejected, a failed call, or a create the provider never received: all final for this attempt.
@@ -138,7 +151,7 @@ async function attemptRecovery(
     chargeId,
     amountCents: payment.amountCents,
   };
-  return callProvider(deps.logger, ids(operation.action), () =>
+  return callProvider(deps, ids(operation.action), () =>
     operation.action === 'capture' ? deps.provider.capture(request) : deps.provider.refund(request),
   );
 }

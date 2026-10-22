@@ -5,6 +5,8 @@ export type { Logger, LoggerOptions, LogLevel } from './logger';
 export { createHttpMetrics, statusClass, UNMATCHED_ROUTE } from './http-metrics';
 export type { HttpMetrics } from './http-metrics';
 export { Counter, createMetricsRegistry, Gauge, Histogram, Registry } from './metrics';
+export { createPaymentMetrics } from './payment-metrics';
+export type { PaymentMetrics } from './payment-metrics';
 export { isSensitiveKey, redact, REDACTED } from './redact';
 export { REQUEST_ID_HEADER, resolveRequestId } from './request-id';
 export { formatTraceparent, parseTraceparent, startSpan, TRACEPARENT_HEADER } from './trace';

@@ -15,7 +15,7 @@ import {
   type PaymentRecord,
   withTransaction,
 } from '@payments/db';
-import type { Logger } from '@payments/observability';
+import type { Logger, PaymentMetrics } from '@payments/observability';
 import type { PaymentProvider } from '@payments/provider';
 import type { Pool, PoolClient } from 'pg';
 
@@ -27,6 +27,7 @@ import {
   WorkMismatchError,
 } from './errors';
 import { canonicalPaymentId } from './ids';
+import { metricsOf } from './metrics';
 import { actionRequestHash, createRequestHash } from './request-hash';
 import {
   assertActionAllowed,
@@ -43,6 +44,8 @@ export interface ReservationDeps {
   leaseOwner: string;
   leaseSeconds: number;
   reviewDeadlineSeconds: number;
+  /** Domain metrics; tests may leave them out. */
+  metrics?: PaymentMetrics | undefined;
 }
 
 /** Who is asking, with which key, and the correlation the reserved job inherits. */
@@ -224,6 +227,7 @@ async function replayOrConflict(
   hash: string,
 ): Promise<Reservation> {
   if (operation.requestHash !== hash) {
+    metricsOf(deps).idempotencyConflicts.inc({ action: operation.action });
     deps.logger.warn(
       { event: 'idempotency.conflict', operationId: operation.id, paymentId: operation.paymentId },
       'Idempotency key reused with a different request',
@@ -233,6 +237,7 @@ async function replayOrConflict(
   const payment = await findPayment(client, operation.paymentId);
   if (!payment)
     throw new WorkMismatchError(`operation ${operation.id} refers to a missing payment`);
+  metricsOf(deps).idempotencyReplays.inc({ action: operation.action });
   deps.logger.debug(
     {
       event: 'idempotency.replayed',
@@ -247,6 +252,10 @@ async function replayOrConflict(
 
 /** Logged only after TX1 committed, so the log never claims work that rolled back. */
 function logCommitted(deps: ReservationDeps, reservation: Reservation): Reservation {
+  if (reservation.kind === 'reserved' && reservation.operation.action === 'authorize') {
+    // A new payment entered its first state.
+    metricsOf(deps).transitions.inc({ from_state: 'none', to_state: 'pending' });
+  }
   if (reservation.kind === 'reserved') {
     deps.logger.info(
       {

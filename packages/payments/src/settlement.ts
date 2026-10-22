@@ -14,12 +14,13 @@ import {
   transitionPayment,
   withTransaction,
 } from '@payments/db';
-import type { Logger } from '@payments/observability';
+import type { Logger, PaymentMetrics } from '@payments/observability';
 import type { PaymentProvider } from '@payments/provider';
 import type { Pool, PoolClient } from 'pg';
 
 import { WorkMismatchError } from './errors';
 import { renewJobLease } from './jobs';
+import { countingFailures, countJobRun, metricsOf } from './metrics';
 import { callProvider, isProviderFailure } from './provider-call';
 import { retryDelayMs } from './recovery';
 import { parsePaymentState, transition } from './transitions';
@@ -34,6 +35,8 @@ export interface SettlementDeps {
   maxRetries: number;
   retryBaseMs: number;
   random?: () => number;
+  /** Domain metrics; tests may leave them out. */
+  metrics?: PaymentMetrics | undefined;
 }
 
 export type SettlementOutcome =
@@ -67,6 +70,18 @@ export async function settlePayment(
   job: JobRecord,
   run: { generation: number },
 ): Promise<SettlementOutcome> {
+  const outcome = await countingFailures(deps, 'settlement', () =>
+    settlementAttempt(deps, job, run),
+  );
+  countJobRun(deps, 'settlement', outcome);
+  return outcome;
+}
+
+async function settlementAttempt(
+  deps: SettlementDeps,
+  job: JobRecord,
+  run: { generation: number },
+): Promise<SettlementOutcome> {
   // Before any provider call or write: the stored job is a settlement job for this payment.
   if (job.type !== 'settlement' || job.operationId !== null) {
     throw new WorkMismatchError(`job ${job.id} is not a settlement job`);
@@ -87,7 +102,7 @@ export async function settlePayment(
   if (!chargeId) throw new Error('A captured payment has no provider payment ID');
   if (!(await renewJobLease(deps.pool, work, deps.leaseSeconds))) return 'lease_lost';
   const answer = await callProvider(
-    deps.logger,
+    deps,
     { paymentId: payment.id, action: 'settle', call: 'getSettlement' },
     async () => {
       const settlement = await deps.provider.getSettlement(chargeId);
@@ -149,6 +164,7 @@ async function settle(
 
   if (outcome === 'wait') return reschedule(deps, work, job, 'poll_rescheduled');
   if (outcome === 'settled') {
+    metricsOf(deps).transitions.inc({ from_state: 'captured', to_state: 'settled' });
     deps.logger.info(
       {
         event: 'payment.transitioned',

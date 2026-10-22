@@ -17,6 +17,7 @@ import {
   reserveAction,
   reserveCreate,
 } from './reservation';
+import { countJobRunOnce, type JobRunOutcome } from './metrics';
 import { callProvider, isProviderFailure, type ProviderFailure } from './provider-call';
 import { mutationResponse, type MutationResponse } from './resources';
 
@@ -44,15 +45,14 @@ export async function createPayment(
   const reservation = await reserveCreate(deps, context, input);
   if (reservation.kind === 'replay') return replayResponse(reservation);
 
-  const { payment, operation, job } = reservation;
-  const call = await callProvider(deps.logger, callIds(operation, 'authorize'), () =>
+  const { payment, operation } = reservation;
+  return runOwnJob(deps, reservation, 'authorize', () =>
     deps.provider.authorize({
       providerKey: operation.providerKey,
       token: payment.paymentMethodToken,
       amountCents: payment.amountCents,
     }),
   );
-  return conclude(deps, { payment, operation, job }, call);
 }
 
 /** POST /payments/{id}/capture. */
@@ -89,10 +89,30 @@ async function runAction(
     chargeId,
     amountCents: payment.amountCents,
   };
-  const call = await callProvider(deps.logger, callIds(operation, input.action), () =>
+  return runOwnJob(deps, { payment, operation, job }, input.action, () =>
     input.action === 'capture' ? deps.provider.capture(request) : deps.provider.refund(request),
   );
-  return conclude(deps, { payment, operation, job }, call);
+}
+
+/**
+ * The API's own run of the operation's recovery job: the provider call, then
+ * finalize or reschedule. Counted in job_runs_total exactly once, like a
+ * worker's run: by its result, or as failed if anything in it throws.
+ */
+async function runOwnJob(
+  deps: PaymentDeps,
+  reserved: { payment: PaymentRecord; operation: OperationRecord; job: JobRecord },
+  callName: string,
+  send: () => Promise<ProviderResult>,
+): Promise<MutationResponse> {
+  const count = countJobRunOnce(deps, 'operation_recovery');
+  try {
+    const call = await callProvider(deps, callIds(reserved.operation, callName), send);
+    return await conclude(deps, reserved, call, count);
+  } catch (error) {
+    count('failed');
+    throw error;
+  }
 }
 
 /** After the call: finalize a definitive answer, or schedule recovery for an unknown one. */
@@ -100,6 +120,7 @@ async function conclude(
   deps: PaymentDeps,
   reserved: { payment: PaymentRecord; operation: OperationRecord; job: JobRecord },
   call: ProviderCall,
+  count: (outcome: JobRunOutcome) => void,
 ): Promise<MutationResponse> {
   const work: WorkRef = {
     paymentId: reserved.payment.id,
@@ -109,9 +130,14 @@ async function conclude(
   };
 
   if (isProviderFailure(call)) {
-    await scheduleRecovery(deps, work, { reason: call.failure, delayMs: deps.recoveryDelayMs });
+    const scheduled = await scheduleRecovery(deps, work, {
+      reason: call.failure,
+      delayMs: deps.recoveryDelayMs,
+    });
+    count(scheduled.kind);
   } else {
     const result = await finalizeOperation(deps, work, call);
+    count(result.kind);
     if (result.kind === 'finalized') return result.response;
   }
   // Scheduled, or someone else got there first: answer with what is stored now.

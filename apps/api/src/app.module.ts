@@ -1,7 +1,7 @@
 import { hostname } from 'node:os';
 
 import { type DynamicModule, Inject, Module, type OnApplicationShutdown } from '@nestjs/common';
-import type { Logger, Registry } from '@payments/observability';
+import { createPaymentMetrics, type Logger, type Registry } from '@payments/observability';
 import type { PaymentDeps } from '@payments/payments';
 import { createFakeProvider, type PaymentProvider } from '@payments/provider';
 import type { Pool } from 'pg';
@@ -47,6 +47,7 @@ function paymentDeps(deps: ApiDependencies): PaymentDeps {
     reviewDeadlineSeconds: config.jobs.reviewDeadlineSeconds,
     recoveryDelayMs: config.workerPollIntervalMs,
     settlementPollMs: config.workerPollIntervalMs,
+    metrics: createPaymentMetrics(deps.metrics),
   };
 }
 

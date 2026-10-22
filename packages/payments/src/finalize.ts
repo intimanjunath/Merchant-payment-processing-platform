@@ -16,10 +16,11 @@ import {
   transitionPayment,
   withTransaction,
 } from '@payments/db';
-import type { Logger } from '@payments/observability';
+import type { Logger, PaymentMetrics } from '@payments/observability';
 import type { Pool, PoolClient } from 'pg';
 
 import { WorkMismatchError } from './errors';
+import { metricsOf } from './metrics';
 import { mutationResponse, type MutationResponse, rejectionResponse } from './resources';
 import {
   InvalidStateTransitionError,
@@ -44,6 +45,8 @@ export interface FinalizeDeps {
   /** Delay before the first settlement check after a capture. */
   settlementPollMs: number;
   reviewDeadlineSeconds: number;
+  /** Domain metrics; tests may leave them out. */
+  metrics?: PaymentMetrics | undefined;
 }
 
 /** The work being finished, and the lease generation the caller holds on its job. */
@@ -217,7 +220,7 @@ export async function finalizeOperation(
     return { kind: 'finalized', response };
   });
 
-  logFinalization(deps.logger, work, outcome, transitioned);
+  logFinalization(deps, work, outcome, transitioned);
   return outcome;
 }
 
@@ -233,7 +236,7 @@ export type ScheduleResult =
  * cleared, so the worker looks the outcome up later.
  */
 export async function scheduleRecovery(
-  deps: Pick<FinalizeDeps, 'pool' | 'logger'>,
+  deps: Pick<FinalizeDeps, 'pool' | 'logger' | 'metrics'>,
   work: WorkRef,
   failure: { reason: 'provider_timeout' | 'provider_unavailable'; delayMs: number },
 ): Promise<ScheduleResult> {
@@ -309,11 +312,15 @@ export function assertSameWork(job: JobRecord, operation: OperationRecord, work:
 
 /** Logged after commit, so a line never describes work that rolled back. */
 function logFinalization(
-  logger: Logger,
+  deps: Pick<FinalizeDeps, 'logger' | 'metrics'>,
   work: WorkRef,
   outcome: FinalizeResult,
   transitioned: { from: string; to: string } | undefined,
 ): void {
+  const { logger } = deps;
+  if (outcome.kind === 'finalized' && transitioned) {
+    metricsOf(deps).transitions.inc({ from_state: transitioned.from, to_state: transitioned.to });
+  }
   const ids = { paymentId: work.paymentId, operationId: work.operationId, jobId: work.jobId };
   if (outcome.kind === 'finalized' && transitioned) {
     logger.info(
