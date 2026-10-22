@@ -856,6 +856,8 @@ ON CONFLICT (work_key) DO NOTHING;
 COMMIT;
 ```
 
+**What finalization stores.** The saved response is what a replay returns. For 200 and 201 it is `{ payment, operation }` as of the commit. For a rejected capture or refund it is `{ error: { code: 'PROVIDER_REJECTED', message, details: { paymentId, operationId, code } } }` without a `requestId`; the API adds the current request's ID when it sends the envelope. A failed create stores the provider's code as `failure_reason` (`card_declined`, or `authorization_not_received` when the provider has no record). The audit row's `request_id` is the operation's, so the API and the worker record the same initiating request. When finalization stops early (operation already resolved, lease lost, version or state changed) it has written nothing, so it ends the transaction without changes.
+
 The `failure_reason` check constraint means state and reason must change together, which path 2a does. A rejected capture or refund resolves its operation without touching the payment, so no transition is invented.
 
 **List payments** (search with `q`, next page with cursor):
@@ -936,7 +938,9 @@ Every line is JSON with `time`, `level`, `service` (`api` or `worker`), `event`,
 | `idempotency.replayed` / `idempotency.conflict` | debug / warn | Replay or conflict |
 | `job.claimed` / `job.poll_rescheduled` | debug | Routine worker activity |
 | `job.retry_scheduled` | warn | Technical failure consumed retry budget |
-| `job.lease_lost` | warn | Generation check failed at finalize |
+| `job.lease_lost` | warn | Generation check failed at finalize or when rescheduling |
+| `operation.version_conflict` | warn | Finalize found the payment at a different version or state than the operation expected; nothing written |
+| `operation.already_final` | debug | Finalize found the operation already resolved; nothing written |
 | `job.paused` | error | Retries exhausted or review deadline: work moved to `needs_review` |
 | `db.pool.idle_client_error` | warn | An idle database connection dropped; logged outside any request context |
 
@@ -986,7 +990,7 @@ All settings come from environment variables, validated at startup; the process 
 | `LOGIN_THROTTLE_MAX_PER_IP` | `50` | API |
 | `PROVIDER_TIMEOUT_MS` | `5000` | API, worker |
 | `SETTLEMENT_DELAY_MS` | `10000` | Fake provider |
-| `WORKER_POLL_INTERVAL_MS` | `5000` | Worker |
+| `WORKER_POLL_INTERVAL_MS` | `5000` | Worker; API (delay of the first recovery after a timeout and of the first settlement check) |
 | `WORKER_CONCURRENCY` | `1` | Worker (jobs claimed only for free slots) |
 | `JOB_LEASE_SECONDS` | `30` | API, worker (must exceed two provider timeouts) |
 | `JOB_MAX_RETRIES` | `3` | API, worker |

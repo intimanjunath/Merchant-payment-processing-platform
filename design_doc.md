@@ -67,7 +67,10 @@ payment-processing/
 │   │   ├── Dockerfile
 │   │   └── src/
 │   │       ├── main.ts
+│   │       ├── app.ts           # Builds the Nest app (shared by main.ts and tests)
 │   │       ├── app.module.ts
+│   │       ├── tokens.ts        # Dependency-injection tokens
+│   │       ├── config/          # Environment validation (spec §8)
 │   │       ├── auth/            # Login, token issue, JWT/session checks, logout, CSRF, throttling
 │   │       ├── payments/        # HTTP routes, request validation, OpenAPI
 │   │       ├── health/          # Liveness, readiness and metrics routes
